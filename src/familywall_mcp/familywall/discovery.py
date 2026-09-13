@@ -1,18 +1,16 @@
-"""Family discovery and context creation from FamilyWall API responses."""
+"""Family discovery: extracting FamilyContext from authenticated login payloads."""
 
 from __future__ import annotations
 
-from familywall_mcp.errors import (
-    ErrorInfo,
-    MalformedPayloadError,
-    UnsupportedConfigurationError,
-)
+from typing import Any
+
+from familywall_mcp.errors import MalformedPayloadError, UnsupportedConfigurationError
 from familywall_mcp.familywall.wire import coerce_bool
 from familywall_mcp.models import DomainModel, FamilyContext
 
 
 class FamilyMember(DomainModel):
-    """A family member as returned from the discovery endpoint."""
+    """A family member as discovered during login."""
 
     account_id: str
     display_name: str
@@ -22,7 +20,7 @@ class FamilyMember(DomainModel):
 
 
 class DiscoveredFamily(DomainModel):
-    """A complete family structure discovered from FamilyWall API."""
+    """A family and its members, discovered during login."""
 
     family_id: str
     family_meta_id: str
@@ -31,39 +29,33 @@ class DiscoveredFamily(DomainModel):
     members: tuple[FamilyMember, ...]
 
     def to_context(self) -> FamilyContext:
-        """Convert to a verified FamilyContext using the authenticated member's account ID.
+        """Build a verified FamilyContext from this discovery, finding the authenticated member.
 
         Returns:
-            A verified FamilyContext with the authenticated member's account ID.
+            A verified FamilyContext with the authenticated principal's account_id.
 
         Raises:
             MalformedPayloadError: If no member is marked as authenticated.
         """
-        authenticated_member = next(
-            (m for m in self.members if m.is_authenticated_member), None
+        authenticated = next(
+            (m for m in self.members if m.is_authenticated_member),
+            None,
         )
-        if authenticated_member is None:
-            raise MalformedPayloadError(
-                ErrorInfo(
-                    code="malformed_upstream_payload",
-                    message="FamilyWall returned data this server could not interpret.",
-                    recovery="Report the endpoint; the upstream contract may have changed.",
-                    endpoint="accgetallfamily",
-                )
-            )
+        if authenticated is None:
+            raise MalformedPayloadError()
 
         return FamilyContext(
-            account_id=authenticated_member.account_id,
+            account_id=authenticated.account_id,
             family_id=self.family_id,
             calendar_id=self.calendar_id,
         )
 
 
 def build_discovery_fields() -> dict[str, str]:
-    """Build the form fields for a discovery call.
+    """Build the request fields for family discovery.
 
     Returns:
-        A dictionary with the required fields for the accgetallfamily endpoint.
+        A dict of form fields to send to accgetallfamily.
     """
     return {
         "partnerScope": "Family",
@@ -72,162 +64,156 @@ def build_discovery_fields() -> dict[str, str]:
 
 
 def parse_discovery(payload: object) -> DiscoveredFamily:
-    """Parse a discovery payload into a verified DiscoveredFamily.
+    """Parse a family discovery payload, enforcing the single-family rule.
 
-    Enforces the single-family rule: exactly one family is required. An array
-    with one family is accepted; an array with multiple families is rejected.
+    The payload is expected to be the unwrapped result from accgetallfamily,
+    which is either:
+    - A single family object
+    - An array containing exactly one family object
+    - (anything else raises UnsupportedConfigurationError or MalformedPayloadError)
 
     Args:
-        payload: The parsed a00.r.r result from accgetallfamily.
+        payload: The unwrapped result from the discovery endpoint.
 
     Returns:
-        A DiscoveredFamily with verified structure and single-family constraint.
+        A DiscoveredFamily with all members parsed.
 
     Raises:
-        UnsupportedConfigurationError: If multiple families are present.
-        MalformedPayloadError: If the structure is invalid or no family is found.
+        UnsupportedConfigurationError: If the payload contains more than one family.
+        MalformedPayloadError: If family_id is missing, empty, or no authenticated member.
     """
-    family_obj = payload
+    families = _normalize_families(payload)
 
-    # If payload is a single-element array, extract and treat as single family
+    if len(families) != 1:
+        raise UnsupportedConfigurationError()
+
+    return _parse_family(families[0])
+
+
+def _normalize_families(payload: object) -> list[Any]:
+    """Normalize a discovery payload to a list of family dicts.
+
+    Args:
+        payload: Either a dict (single family) or a list (possibly multiple families).
+
+    Returns:
+        A list of family dicts.
+
+    Raises:
+        UnsupportedConfigurationError: If payload suggests multiple families.
+        MalformedPayloadError: If payload structure is invalid.
+    """
+    if isinstance(payload, dict):
+        return [payload]
+
     if isinstance(payload, list):
         if len(payload) == 0:
-            raise MalformedPayloadError(
-                ErrorInfo(
-                    code="malformed_upstream_payload",
-                    message="FamilyWall returned data this server could not interpret.",
-                    recovery="Report the endpoint; the upstream contract may have changed.",
-                    endpoint="accgetallfamily",
-                )
-            )
+            raise MalformedPayloadError()
         if len(payload) > 1:
-            raise UnsupportedConfigurationError(
-                ErrorInfo(
-                    code="unsupported_configuration",
-                    message="This account is in a configuration this server does not support.",
-                    recovery="See the documented limitations; no action was taken.",
-                    endpoint="accgetallfamily",
-                )
-            )
-        family_obj = payload[0]
+            raise UnsupportedConfigurationError()
+        if not isinstance(payload[0], dict):
+            raise MalformedPayloadError()
+        return payload
 
-    # Validate the family object is a dict
-    if not isinstance(family_obj, dict):
-        raise MalformedPayloadError(
-            ErrorInfo(
-                code="malformed_upstream_payload",
-                message="FamilyWall returned data this server could not interpret.",
-                recovery="Report the endpoint; the upstream contract may have changed.",
-                endpoint="accgetallfamily",
-            )
-        )
+    raise MalformedPayloadError()
 
-    # Extract family_id
-    family_id = family_obj.get("family_id")
-    if not isinstance(family_id, str) or not family_id:
-        raise MalformedPayloadError(
-            ErrorInfo(
-                code="malformed_upstream_payload",
-                message="FamilyWall returned data this server could not interpret.",
-                recovery="Report the endpoint; the upstream contract may have changed.",
-                endpoint="accgetallfamily",
-            )
-        )
 
-    # Extract family_meta_id (metaId in wire format)
-    family_meta_id = family_obj.get("metaId")
-    if not isinstance(family_meta_id, str) or not family_meta_id:
-        raise MalformedPayloadError(
-            ErrorInfo(
-                code="malformed_upstream_payload",
-                message="FamilyWall returned data this server could not interpret.",
-                recovery="Report the endpoint; the upstream contract may have changed.",
-                endpoint="accgetallfamily",
-            )
-        )
+def _parse_family(family: dict[str, Any]) -> DiscoveredFamily:
+    """Parse a single family dict into DiscoveredFamily.
 
-    # Extract name
-    name = family_obj.get("name")
-    if not isinstance(name, str) or not name:
-        raise MalformedPayloadError(
-            ErrorInfo(
-                code="malformed_upstream_payload",
-                message="FamilyWall returned data this server could not interpret.",
-                recovery="Report the endpoint; the upstream contract may have changed.",
-                endpoint="accgetallfamily",
-            )
-        )
+    Args:
+        family: A family dict from the discovery payload.
 
-    # Derive calendar_id
+    Returns:
+        A DiscoveredFamily with all validation applied.
+
+    Raises:
+        MalformedPayloadError: If required fields are missing or invalid.
+    """
+    family_id_raw = family.get("family_id")
+    if not isinstance(family_id_raw, str):
+        raise MalformedPayloadError()
+    family_id = family_id_raw.strip()
+    if not family_id:
+        raise MalformedPayloadError()
+
+    family_meta_id_raw = family.get("metaId")
+    if not isinstance(family_meta_id_raw, str):
+        raise MalformedPayloadError()
+    family_meta_id = family_meta_id_raw.strip()
+    if not family_meta_id:
+        raise MalformedPayloadError()
+
+    name_raw = family.get("name")
+    if not isinstance(name_raw, str):
+        raise MalformedPayloadError()
+    name = name_raw.strip()
+    if not name:
+        raise MalformedPayloadError()
+
     calendar_id = f"calendar/{family_id}"
 
-    # Parse members array
-    members_data = family_obj.get("members")
-    if not isinstance(members_data, list):
-        raise MalformedPayloadError(
-            ErrorInfo(
-                code="malformed_upstream_payload",
-                message="FamilyWall returned data this server could not interpret.",
-                recovery="Report the endpoint; the upstream contract may have changed.",
-                endpoint="accgetallfamily",
-            )
-        )
+    members_list = family.get("members")
+    if not isinstance(members_list, list):
+        raise MalformedPayloadError()
 
-    members: list[FamilyMember] = []
-    for member_obj in members_data:
-        if not isinstance(member_obj, dict):
-            raise MalformedPayloadError(
-                ErrorInfo(
-                    code="malformed_upstream_payload",
-                    message="FamilyWall returned data this server could not interpret.",
-                    recovery="Report the endpoint; the upstream contract may have changed.",
-                    endpoint="accgetallfamily",
-                )
-            )
+    members = tuple(_parse_member(m) for m in members_list)
 
-        account_id = member_obj.get("accountId")
-        if not isinstance(account_id, str) or not account_id:
-            raise MalformedPayloadError(
-                ErrorInfo(
-                    code="malformed_upstream_payload",
-                    message="FamilyWall returned data this server could not interpret.",
-                    recovery="Report the endpoint; the upstream contract may have changed.",
-                    endpoint="accgetallfamily",
-                )
-            )
-
-        # Display name: prefer 'name' field, fall back to 'firstName'
-        display_name = member_obj.get("name")
-        if not isinstance(display_name, str) or not display_name:
-            display_name = member_obj.get("firstName", "")
-        if not isinstance(display_name, str):
-            display_name = ""
-
-        first_name = member_obj.get("firstName")
-        if not isinstance(first_name, str):
-            first_name = None
-
-        # Timezone is optional, can be None if absent
-        timezone = member_obj.get("timeZone")
-        if not isinstance(timezone, (str, type(None))):
-            timezone = None
-
-        # Parse isloggedaccount boolean
-        is_authenticated = coerce_bool(member_obj.get("isloggedaccount", "false"))
-
-        member = FamilyMember(
-            account_id=account_id,
-            display_name=display_name,
-            first_name=first_name,
-            timezone=timezone,
-            is_authenticated_member=is_authenticated,
-        )
-        members.append(member)
+    # Verify at least one member is authenticated
+    if not any(m.is_authenticated_member for m in members):
+        raise MalformedPayloadError()
 
     return DiscoveredFamily(
         family_id=family_id,
         family_meta_id=family_meta_id,
         calendar_id=calendar_id,
         name=name,
-        members=tuple(members),
+        members=members,
+    )
+
+
+def _parse_member(member: Any) -> FamilyMember:
+    """Parse a single family member dict.
+
+    Args:
+        member: A member dict from the family.
+
+    Returns:
+        A FamilyMember with all fields parsed.
+
+    Raises:
+        MalformedPayloadError: If required fields are missing or invalid.
+    """
+    if not isinstance(member, dict):
+        raise MalformedPayloadError()
+
+    account_id = member.get("accountId", "").strip()
+    if not account_id:
+        raise MalformedPayloadError()
+
+    display_name = member.get("name", "").strip()
+    if not display_name:
+        raise MalformedPayloadError()
+
+    first_name = member.get("firstName")
+    if isinstance(first_name, str):
+        first_name = first_name.strip() or None
+    elif first_name is not None:
+        raise MalformedPayloadError()
+
+    timezone = member.get("timeZone")
+    if isinstance(timezone, str):
+        timezone = timezone.strip() or None
+    elif timezone is not None:
+        raise MalformedPayloadError()
+
+    is_authenticated_str = member.get("isloggedaccount")
+    is_authenticated = coerce_bool(is_authenticated_str)
+
+    return FamilyMember(
+        account_id=account_id,
+        display_name=display_name,
+        first_name=first_name,
+        timezone=timezone,
+        is_authenticated_member=is_authenticated,
     )
