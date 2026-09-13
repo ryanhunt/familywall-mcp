@@ -38,14 +38,15 @@ class DayAgenda(DomainModel):
     day: date
     events: tuple[CalendarEvent, ...]
 
+
 class WeekOverview(DomainModel):
-    range_start: datetime          # inclusive, local
-    range_end: datetime            # exclusive, local
+    range_start: datetime  # inclusive, local
+    range_end: datetime  # exclusive, local
     timezone: str
-    days: tuple[DayAgenda, ...]    # always exactly 7 for a week
+    days: tuple[DayAgenda, ...]  # always exactly 7 for a week
     total_events: int
-    complete: bool                 # False when a bound was reached
-    notes: tuple[str, ...]         # human-readable caveats, e.g. skipped events
+    complete: bool  # False when a bound was reached
+    notes: tuple[str, ...]  # human-readable caveats, e.g. skipped events
 ```
 
 Behaviour:
