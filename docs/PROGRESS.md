@@ -20,13 +20,14 @@ deferred until the stdio server works end to end.
 | P0 | 00A/00B/00C contracts, calendar, ADR | `docs/contracts/`, `docs/decisions/0001-auth-and-sdk.md` | done |
 | P1 | 01A/01B foundation and offline harness | PR #1 | done |
 | P2a | **02P read-only live probe** | contracts + `docs/compatibility.md` updated; commit `2323362` | **done 2026-09-13** |
-| P2b | 02A transport, envelope, login | `familywall/wire.py`, `familywall/client.py` | delegated |
-| P2b | 02B discovery, family context, session lifecycle | `familywall/discovery.py`, `services/session.py` | not started |
-| P3 | 03A list wire adapters | `familywall/lists.py` | delegated |
-| P3 | 03B list selection and mutation service | `services/lists.py` | not started |
+| P2b | 02A transport, envelope, login | `familywall/wire.py`, `familywall/client.py` | **done**: `01e6ba8` |
+| P2b | 02B discovery, family context, session lifecycle | `familywall/discovery.py`, `services/session.py` | **done**: `4ce6815` |
+| P3 | 03A list wire adapters | `familywall/lists.py` | **done**: `7a655d5` |
+| P3 | 03B list selection and mutation service | `services/lists.py`, `storage/memory.py` | **done**: `1382d8f` |
 | P3 | 03C shopping MCP tools | `tools/` | not started |
-| P4 | 04A calendar adapters and local ranges | `familywall/calendar.py`, `services/ranges.py` | delegated |
-| P4 | 04B week service and calendar tools | `services/calendar.py`, `tools/` | not started |
+| P4 | 04A calendar adapters and local ranges | `familywall/calendar.py`, `services/ranges.py` | **done**: `e4170c2` |
+| P4 | 04B weekly overview service | `services/calendar.py` | delegated |
+| P3/P4 | MCP tool surface and stdio server | `tools/`, `server.py` | lead, next |
 | — | stdio server entry point and local smoke test | `server.py`, `cli.py` | not started |
 | P5 | Storage, invites, OAuth | — | deferred until stdio works |
 | P6 | Containers and HTTPS | — | deferred until stdio works |
@@ -57,6 +58,28 @@ Decisions now binding on implementation:
    Session expiry is `un`/`501`/`NOAUTHENT`, not 401 and not HTML.
 7. **`quantity` is not readable.** A tool that writes one cannot verify it, and
    must say so rather than imply success.
+
+## Review findings worth carrying forward
+
+Delegated implementation was reviewed rather than accepted on report. Every task
+needed at least one correction round, and three defect classes recurred:
+
+1. **Silently skipped requirements.** 02B shipped `_reauth_and_retry` as dead
+   code that nothing called, so the bounded-read-reauth and never-retry-writes
+   rules did not exist; 03B deferred four receipt-state-machine criteria to
+   "integration testing" that were plain unit tests. Both reported high passing
+   test counts truthfully. Numbering the required tests in the brief is what
+   made the absences checkable.
+2. **Mock-shaped correctness.** 03B called a `taskgetlist` endpoint that does
+   not exist; its fake transport accepted it and all 234 tests passed. A green
+   mock suite cannot tell you whether the real API would answer. **Every
+   endpoint string must be checked against the contract, and the local stdio
+   smoke test is the real gate for this phase.**
+3. **Exception types that do not match the codebase.** 03B caught the Python
+   builtins `TimeoutError`/`ConnectionError`/`OSError`, but the transport raises
+   the project's own `TransportError`, which subclasses none of them — so a lost
+   write would have propagated instead of yielding `unknown`. Caught only by
+   checking the class hierarchy directly.
 
 ## Still `pending-live`
 
