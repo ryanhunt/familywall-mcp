@@ -1,7 +1,13 @@
 # FamilyWall MCP implementation plan
 
-Status: P0 discovery complete; P1 foundation implemented; runtime not built.
+Status: P0 discovery complete; P1 foundation implemented; P2a live probe
+complete and its findings binding; runtime under construction.
 Updated 2026-09-13.
+
+**Current delivery target: a local stdio server the user can run against their
+own account.** P5 (OAuth), P6 (containers, HTTPS) and multi-user hosting are
+deferred until that works end to end. This is a sequencing change, not a scope
+change.
 
 ## Outcome and agreed scope
 
@@ -72,10 +78,10 @@ Building the wrong one is the most expensive mistake available here.
 | --- | --- | --- | --- |
 | P0 | Contract and SDK reconnaissance | — | **done**: contracts, ADR 0001, compatibility record |
 | P1 | Python package and offline harness | P0 | **done**: PR #1, `scripts/check` green on a clean checkout |
-| P2a | Read-only live probe | P1, test account | The eight open questions answered and recorded |
-| P2b | FamilyWall client, session and family context | P2a (or offline with gaps recorded) | Synthetic auth/error cases; discovery validated |
+| P2a | Read-only live probe | P1, test account | **done 2026-09-13**: all blocking questions answered; four source-derived claims corrected |
+| P2b | FamilyWall client, session and family context | P2a | Synthetic auth/error cases; discovery validated |
 | P3 | Shopping-list services and tools | P2b | Exact request tests, readback, ambiguity, unknown-write handling |
-| P4 | Calendar services and tools | P2b + P2a calendar answers | DST/recurrence/overlap tests and a calendar comparison |
+| P4 | Calendar services and tools | P2b | DST/recurrence/overlap tests and a calendar comparison. **Unblocked**: consume server-expanded occurrences |
 | P5 | Per-user storage, login and OAuth | P1, ADR 0001 | Two-user HTTP isolation; login/refresh/revoke/restart |
 | P6 | Hosted service and operations | P3, P4, P5 | HTTPS deployment, recovery drill, both clients connected |
 | P7 | Acceptance and v1 release preparation | P6 | Acceptance matrix passes; limitations documented |
@@ -86,43 +92,32 @@ work can start immediately after P1 against a synthetic principal. Integration i
 serial. An incomplete OAuth phase must never expose an unauthenticated service to
 the internet.
 
-## P2a — Read-only live probe
+## P2a — Read-only live probe — **complete, 2026-09-13**
 
-**Objective:** convert `pending-live` into fact. Nothing else in this phase.
+The probe ran read-only against a real account supplied outside Git. No write
+endpoint was called; only key names, structural shapes, enum values and date
+semantics were retained, with every free-text value and identifier hashed before
+display. The script was discarded, as planned.
 
-Rules: read-only; no write endpoint is called; credentials are supplied outside
-chat and Git; captured payloads are reduced to shapes and field names, with
-family names, event titles, member names and IDs redacted before anything is
-written to the repository.
+It did not require the pre-constructed test week the original procedure assumed:
+the account's own calendar already contained a recurring series with cancelled
+occurrences, all-day events, and a birthday from a second calendar, and the
+boundary questions were answered by querying synthetic windows around a known
+event rather than by creating one.
 
-Procedure — one throwaway script, not production code:
+**Findings and their consequences** are recorded in
+[familywall.md](contracts/familywall.md#live-verification--02p-probe-2026-09-13),
+[calendar.md](contracts/calendar.md#live-verified-summary-2026-09-13), and
+[compatibility.md](compatibility.md). The seven binding decisions are listed in
+[PROGRESS](PROGRESS.md#what-02p-settled-and-what-it-changed).
 
-1. `log2in`; record what cookies come back and whether `JSESSIONID` alone
-   authenticates a subsequent call. Determine whether `webset`/`webget` are
-   required for list and calendar calls or only for login.
-2. Call `accgetallfamily` with a reduced batch (`a00` + `a01` only). Record how
-   many families the account has and the shape of the family payload. Confirm
-   whether the constant `deviceId` fields are needed.
-3. `taskgettasklists`; record how many lists, their types, and whether the
-   response is a bare array or wrapped.
-4. `tasklist` on one list; record item field names actually present.
-5. `evtlistinterval` with `calendar/{family_id}` for a week known to contain: a
-   normal event, an all-day event, a multi-day all-day event, a recurring series
-   with at least one cancelled or modified occurrence, and an event that starts
-   before the window and ends inside it. **This week must be constructed in the
-   FamilyWall UI first** — the probe's value depends entirely on knowing the
-   expected answer before reading it.
-6. Record whether recurring occurrences arrive expanded or as a master, how an
-   occurrence is identified, how all-day is encoded, and whether the overlapping
-   event appeared.
-7. Deliberately invalidate the session (or wait it out) and record how expiry
-   presents: HTTP 401, an HTML login page, or an `a00.ex` envelope.
+**The P4 branch decision: consume server-expanded occurrences.** The local
+expansion sub-task is cancelled. No recurrence library enters this project.
 
-**Gate:** update [contracts](contracts/familywall.md),
-[calendar contracts](contracts/calendar.md) and [compatibility](compatibility.md),
-promoting each answered item from `pending-live` to `live-verified` with the date.
-Then decide the P4 branch: consume expanded occurrences, or implement expansion.
-The probe script is discarded; only its findings are kept.
+Four questions remain `pending-live` and are listed in
+[PROGRESS](PROGRESS.md#still-pending-live). Three of them are write-path
+questions that only a controlled P3 live check can answer; one needs a
+deliberately created multi-day all-day event.
 
 ## P2b — Client, sessions and family context
 
