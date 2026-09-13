@@ -356,6 +356,76 @@ isolation across redirects and a read-time size limit), and
 `webgetWebSocketUrl`. Meals, recipes, categories and ingredient transfer have
 endpoint names only and no contracts at all.
 
+## Live write verification — 2026-09-14, and a blocking finding
+
+A controlled live write check ran against a disposable list. It answered the
+write-path questions and produced **a finding that blocks the headline v1 use
+case**.
+
+### `taskcreate` ignores the list identifier
+
+Four field spellings were tried against a list named `Claude`
+(`taskListType: OTHER`):
+
+| Variant | Field | Value |
+| --- | --- | --- |
+| A | `a00taskListId` | prefixed `taskList/<id>` (what this client sends) |
+| B | `a00taskListId` | bare numeric id |
+| C | `a00listId` | prefixed `taskList/<id>` |
+| D | `a00taskList` | prefixed `taskList/<id>` |
+
+**All four returned HTTP 200 with a success envelope, created a task, and put it
+in the family's default `TODOS` list — never in the requested list.** The
+response's own `taskListId` field reports the default list's id in every case,
+and `categories` comes back as the system category `SYS-CAT-TODOS`.
+
+The target list's item count never changed. There is therefore **no evidenced
+way to create an item in a chosen list** with this endpoint as currently
+understood. `a00taskListId` appears in the reference TypeScript client
+(`list-items.test.ts:29-35`) as a `source-tested` request field, but that test
+asserts only what the client *sends*; the live service ignores it.
+
+Consequences, binding until discovery resolves them:
+
+1. **"Add bread to the shopping list" cannot be delivered.** An add lands in the
+   default TODOS list regardless of the list the user names, which is a silent
+   wrong-destination write — worse than a refusal.
+2. `add_list_item` must **not** ship claiming it can target a list. Either the
+   tool is withheld, or it states plainly that items go to the default list.
+3. The list-selection logic in `services/lists.py` is correct and well tested,
+   but it currently selects a list the write then ignores.
+4. Further discovery is needed: another endpoint, an extra required field, or a
+   separate "move to list" call. The reference client is exhausted as a source —
+   this needs observation of the real web app's network traffic.
+
+### `taskcreate` response shape — answered
+
+It returns a **full task object**, not a bare string id:
+
+`accountId`, `assignee[]`, `assigneeIds[]`, `bestMoment`, `categories[]`,
+`comments[]`, `complete`, `creationDate`, `editable`, `familyId`, `lastAction`
+(`CREATED`), `lastActionAuthor`, `lastActionDate`, `medias[]`, `metaId`,
+`modifDate`, `moodMap`, `moodStarShortcut`, `recurrency`,
+`recurrencyDeletedOccurence`, `reminder`, `sortingIndex`, `taskId`,
+`taskListId`, `text`, `toAll`.
+
+`metaId` and `taskId` are both `task/<id>`. **`taskListId` reports where the item
+actually went**, which is what exposed the finding above — a client that reads it
+back can at least detect the wrong destination.
+
+### `quantity` is silently dropped — answered
+
+`a00quantity=2 boxes` was sent with a create. The response contains **no
+quantity-like key at all**, matching the read-side finding of no quantity across
+85 items. Quantity is accepted by the request, ignored by the service, and
+unreadable. **No tool may advertise quantity**; passing one must either be
+refused or reported as not stored.
+
+### `taskmark` — still unanswered
+
+Not exercised. The check could not reach it, because no item could be created in
+the target list and the rules forbade marking items the run did not create.
+
 ## Open questions
 
 Answered by the 02P probe on 2026-09-13, now `live-verified`:
@@ -373,11 +443,14 @@ Answered by the 02P probe on 2026-09-13, now `live-verified`:
 
 Still `pending-live`:
 
-1. **What does `taskmark` actually return, and what does `taskcreate` return?**
-   Both are writes and the 02P probe was read-only. They are answered by the P3
-   controlled live acceptance in a disposable test list, not by another probe.
-2. **Is `quantity` writable and readable at all?** No read evidence exists. P3
-   must write a quantity and re-read it before any tool advertises the field.
+1. ~~What does `taskcreate` return?~~ Answered 2026-09-14: a full task object,
+   including the `taskListId` it actually used. **What does `taskmark` return?**
+   Still unanswered.
+2. ~~Is `quantity` writable and readable?~~ Answered 2026-09-14: it is silently
+   dropped. Not writable, not readable.
+3. **How does one create an item in a chosen list?** No known mechanism. This is
+   now the project's top blocker and needs fresh discovery against the real web
+   app, not the reference client.
 3. **What does discovery return for an account in more than one family?** The
    probe account has one. `a00.r.r` is an object, so the multi-family shape is
    unknown. The single-family rule stands and must fail closed on anything
