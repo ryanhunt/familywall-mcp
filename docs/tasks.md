@@ -1,9 +1,9 @@
 # Delegable implementation tasks
 
-Status: Phase 1 tasks 01A and 01B are **done** on the foundation branch; P0
-contract/SDK decisions and all later runtime tasks remain not started. Update
-this file with task status, commit/PR and acceptance evidence as work lands. See
-[phase plan](implementation-plan.md).
+Status: Phase 1 tasks 01A and 01B are **done** on PR #1; P0 contract/SDK
+decisions and all later runtime tasks remain not started. Update this file with
+task status, commit/PR and acceptance evidence as work lands. See [phase
+plan](implementation-plan.md).
 
 ## Copyable delegation prompt
 
@@ -32,8 +32,8 @@ check fails instead of reopening the entire phase.
 | 00A | FamilyWall wire contract and family context | none | Luna reconnaissance |
 | 00B | Calendar live-semantics evidence | none | Luna evidence + lead review |
 | 00C | SDK and self-hosted OAuth decision/spike | none | Lead-directed Luna + lead decision |
-| 01A | Package/config/model foundation | 00A, 00C | done: docs/handoffs/phase1-foundation.md |
-| 01B | Offline harness and CI | 01A | done: docs/handoffs/phase1-foundation.md |
+| 01A | Package/config/model foundation | 00A, 00C | done: PR #1, docs/handoffs/phase1-foundation.md |
+| 01B | Offline harness and CI | 01A | done: PR #1, docs/handoffs/phase1-foundation.md |
 | 02A | Transport, login and error handling | 01B | Luna |
 | 02B | Discovery, family context and sessions | 02A, 00A | Luna + lead isolation review |
 | 03A | List API adapters | 02B | Luna |
