@@ -1,0 +1,46 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.local
+*.pem
+*.key
+credentials*.json
+service-account*.json
+
+# Python environments and generated files
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local authentication, browser, and request captures
+cookies.json
+cookie*.json
+*.har
+*.har.json
+oauth_state*.json
+*_state.json
+.mcp-state/
+data/
+backups/
+secrets/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+.coverage
+htmlcov/
+.claude/settings.local.json
+
+# Local operating-system metadata
+.DS_Store
