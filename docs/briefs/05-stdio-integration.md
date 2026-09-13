@@ -53,8 +53,9 @@ expect `call(endpoint, fields)`. Bridge them **without losing the distinction**:
 
 ```python
 class PooledTransport:
-    def __init__(self, pool: SessionPool, principal: Principal,
-                 read_write: Literal["read", "write"]) -> None: ...
+    def __init__(
+        self, pool: SessionPool, principal: Principal, read_write: Literal["read", "write"]
+    ) -> None: ...
     async def call(self, endpoint: str, fields: Mapping[str, str]) -> object: ...
 ```
 
