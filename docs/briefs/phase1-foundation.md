@@ -7,7 +7,9 @@ the FamilyWall MCP project, without inventing upstream API or OAuth contracts.
 
 ## Scope
 
-- In scope: 01A package/config/contracts and 01B harness/CI/documentation.
+- In scope: 01A package/config/contracts and 01B harness/checks/documentation.
+  (The CI workflow this brief scoped was removed from the repository on
+  2026-09-13; `scripts/check` is run locally instead.)
 - Files or components allowed to change: package metadata, `src/`, `tests/`, CI,
   scripts, dummy environment example, and project guidance/status docs.
 - Out of scope: FamilyWall endpoints, live HTTP, MCP tools, OAuth, persistence,

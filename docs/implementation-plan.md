@@ -104,9 +104,11 @@ Work:
 - Add pytest fixtures for JSON envelopes, fake cookies, a fixed clock, request capture
   and a fake upstream that rejects unexpected calls. Block external network in the
   default suite. Include a substantive config/error test rather than placeholder tests.
-- Set up CI for locked installation, lint/format checks, typing, offline tests, build
-  and secret detection. Include low-permission CI settings and inspect tracked build
-  inputs. Keep a future `.dockerignore` in scope before any container build.
+- Provide a single local check entry point covering locked installation, lint/format
+  checks, typing, offline tests, build and secret detection, and inspect tracked build
+  inputs. This project deliberately has no CI workflow; the checks are run locally and
+  their results recorded in the pull request. Keep a future `.dockerignore` in scope
+  before any container build.
 - Update AGENTS/CONTRIBUTING with real commands only when they exist; preserve the
   shared Claude import. Keep inherited license notices with ported material.
 
@@ -294,8 +296,8 @@ negative boundaries where the accounts would otherwise share identical access.
 
 Release deliverables: concise user README with tested connection instructions,
 operator runbook, supported-tool/scope table, known limitations and compatibility
-record. Run full established CI and the controlled acceptance suite once; repeat
-only checks affected by a fix. V1 is ready only when all required rows pass.
+record. Run the full local check suite and the controlled acceptance suite once;
+repeat only checks affected by a fix. V1 is ready only when all required rows pass.
 Commit/push/release publication follow the user's delivery request.
 
 ## P8 — Independent extensions

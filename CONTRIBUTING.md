@@ -14,8 +14,12 @@ delivery actions that require the user's request.
 Install from the committed lockfile with `uv sync --frozen --group dev`, then run
 `scripts/check`. Individual checks are `uv run ruff check .`, `uv run ruff format
 --check .`, `uv run mypy src`, `uv run pytest -m 'not live'`, and `uv build`.
-The suite blocks external network access by default; live tests are not included
-in ordinary CI and require explicit authorization.
+The suite blocks external network access by default; live tests are excluded
+from the default run and require explicit authorization.
+
+There is no continuous-integration workflow in this repository. `scripts/check`
+is run locally and its result recorded in the pull request; nothing enforces it
+automatically.
 
 Keep credentials and private family data out of the repository and its
 diagnostics. Use synthetic fixtures and dummy values in examples. Existing

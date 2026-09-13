@@ -86,7 +86,7 @@ src/familywall_mcp/
 tests/
   unit/                  # synthetic wire fixtures and domain behavior
   integration/           # local fake upstream and actual MCP HTTP/auth
-  live/                  # opt-in test-family probes, excluded from normal CI
+  live/                  # opt-in test-family probes, excluded from default runs
 docs/                    # plan, contracts, decisions, operational runbooks
 ```
 

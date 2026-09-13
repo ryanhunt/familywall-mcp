@@ -1,5 +1,10 @@
 # Handoff
 
+> Superseded in part: the GitHub Actions workflow described below was removed
+> from the repository on 2026-09-13, after this handoff was written. The checks
+> themselves remain in `scripts/check` and are run locally. References to CI in
+> this record describe the state at the time Phase 1 landed.
+
 ## Outcome
 
 Phase 1 foundation tasks 01A and 01B are implemented on the current branch. The
