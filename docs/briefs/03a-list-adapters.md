@@ -75,7 +75,7 @@ equivalent that keeps the original string. This is a hard requirement.
 
 ```python
 class ShoppingList(DomainModel):
-    list_id: str          # the full "taskList/<digits>" metaId
+    list_id: str  # the full "taskList/<digits>" metaId
     name: str
     type_raw: str
     known_type: ListType | None
@@ -84,9 +84,10 @@ class ShoppingList(DomainModel):
     color: str | None
     system_id: str | None
 
+
 class ListItem(DomainModel):
-    item_id: str          # the full "task/<digits>" metaId
-    list_id: str          # taskListId — the owning list's metaId
+    item_id: str  # the full "task/<digits>" metaId
+    list_id: str  # taskListId — the owning list's metaId
     text: str
     completed: bool
     description: str | None

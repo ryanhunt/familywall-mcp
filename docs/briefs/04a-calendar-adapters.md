@@ -71,30 +71,32 @@ Frozen pydantic models in the style of `src/familywall_mcp/models.py`
 (`extra="forbid"`, `frozen=True`).
 
 ```python
-class TimedSpan(DomainModel):      # allDay == "false"
-    start: datetime                # timezone-aware UTC
+class TimedSpan(DomainModel):  # allDay == "false"
+    start: datetime  # timezone-aware UTC
     end: datetime
 
-class AllDaySpan(DomainModel):     # allDay == "true"
-    start_date: date               # taken verbatim from the UTC date component
+
+class AllDaySpan(DomainModel):  # allDay == "true"
+    start_date: date  # taken verbatim from the UTC date component
     end_date: date
 
+
 class CalendarEvent(DomainModel):
-    occurrence_id: str             # eventId
-    series_id: str                 # eventMasterId
+    occurrence_id: str  # eventId
+    series_id: str  # eventMasterId
     occurrence_index: int | None
     title: str
     span: TimedSpan | AllDaySpan
-    raw_start: str                 # the upstream string, preserved verbatim
+    raw_start: str  # the upstream string, preserved verbatim
     raw_end: str
-    event_type: str                # preserved verbatim, never coerced
+    event_type: str  # preserved verbatim, never coerced
     calendar_id: str | None
-    event_timezone: str | None     # IANA name as received, unvalidated
+    event_timezone: str | None  # IANA name as received, unvalidated
     location: str | None
     description: str | None
-    recurrence_rule: str | None    # rrule, verbatim
-    is_recurring: bool             # recurrency not in (None, "", "NONE")
-    is_series_exception: bool      # recurrencyExceptionOfId present
+    recurrence_rule: str | None  # rrule, verbatim
+    is_recurring: bool  # recurrency not in (None, "", "NONE")
+    is_series_exception: bool  # recurrencyExceptionOfId present
 ```
 
 - `parse_events(payload: object) -> ParsedEvents` where `ParsedEvents` carries
@@ -119,8 +121,8 @@ year.
 
 ```python
 class LocalRange(DomainModel):
-    start: datetime   # timezone-aware, in the requested zone
-    end: datetime     # exclusive
+    start: datetime  # timezone-aware, in the requested zone
+    end: datetime  # exclusive
     timezone: str
 ```
 
