@@ -3,8 +3,21 @@
 Owner: delegated. **Lead reviews the receipt state machine and the membership
 check before integration.**
 
-Depends on 03A (`familywall/lists.py`, delivered and reviewed) and 02B
-(`services/session.py`). Read both before starting and use their real APIs.
+Depends on 03A (`familywall/lists.py`, delivered and reviewed). Read it before
+starting and use its real API.
+
+Task 02B is being written **concurrently** and owns `services/session.py`. Do
+not import it, do not wait for it, and do not create it. Your service takes its
+upstream dependency as a **narrow injected protocol you define yourself** in
+`services/lists.py`, e.g.
+
+```python
+class ListTransport(Protocol):
+    async def call(self, endpoint: str, fields: Mapping[str, str]) -> object: ...
+```
+
+The lead wires the real session to it during integration. Your tests inject a
+fake that records calls.
 
 ## File boundary — do not edit anything else
 
