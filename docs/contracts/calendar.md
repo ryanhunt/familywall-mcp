@@ -1,79 +1,182 @@
 # FamilyWall calendar contract
 
-Status: **source-derived, materially incomplete**. Produced by P0 task 00B on
-2026-09-13 from `familywall-api@c85bb152115d3c41ab90322ef9dce732122ff4c0`.
-Evidence levels are defined in [the main contract](familywall.md).
+Status: **live-verified for reads**. Produced by P0 task 00B on 2026-09-13 from
+`familywall-api@c85bb152115d3c41ab90322ef9dce732122ff4c0`, then settled by the
+02P read-only live probe on 2026-09-13 against a real family calendar
+(47 events in a one-month window, 1115 in a three-year window).
 
-The headline finding: the reference client's *read* path proves only six event
-fields. All-day encoding, recurrence and cancellation — the three things a
-correct weekly overview depends on — have **no evidence at all**. This is the
-largest single risk in the project and it is why P4 cannot be planned as a
-straightforward port.
+**The two P0 blockers are resolved.** The server expands recurring occurrences,
+and all-day events have an explicit flag. The conditional local-expansion branch
+of P4 is therefore **not needed** and must not be built. Evidence levels are
+defined in [the main contract](familywall.md).
+
+## Live-verified summary (2026-09-13)
+
+| Question | Answer |
+| --- | --- |
+| Does `evtlistinterval` expand recurrence? | **Yes.** Each occurrence is a separate object with its own `eventId`, plus `eventMasterId`, `occurenceIndex` and an iCal `rrule` |
+| How is an occurrence identified? | `eventId` (== `metaId`) per occurrence; `eventMasterId` groups the series; `occurenceIndex` is its integer position |
+| How is a cancelled occurrence represented? | It is **absent** from the expansion. The surviving occurrences carry `exdate` (excluded instants) and `recurrencyDeletedOccurence` (excluded indexes) for reference |
+| How is all-day encoded? | `allDay` is the string `"true"`; `startDate` is `<date>T00:00:00.000Z` and `endDate` is `<date>T23:59:59.000Z` |
+| Are interval bounds inclusive? | Half-open and overlap-based: an event is returned iff `startDate < a00to` **and** `endDate > a00from` |
+| Are overlapping events returned? | **Yes** — a window strictly inside a longer event returns that event |
+| Do non-event objects appear? | Yes. `eventType` was `UNKNOWN` (ordinary events) and `BIRTHDAY_ACCOUNT`, the latter from a different calendar, `calendarSpecialDays/<accountId>` |
+| Is there a result cap? | None observed up to 1115 events / 1095 days. No continuation mechanism exists |
+| Is `calendar/{family_id}` the real ID? | Yes — it is the `calendarId` the server stamps on ordinary events. But see the warning below |
+
+### `calendarId` is not a filter — a correction with a security consequence
+
+The probe sent `calendarId=calendar/000000`, a family that is not the caller's,
+and also omitted `calendarId` entirely. **Both returned the caller's own events,
+identical to the correct request.** The server ignores the parameter and scopes
+the query to the session's family, exactly as the list endpoints do.
+
+Two binding consequences:
+
+1. `calendarId` must never be treated as an access boundary, and no tool may
+   accept a caller-supplied calendar ID and imply it selects anything. It is sent
+   for contract fidelity only.
+2. A response may contain events from several of the family's calendars. If the
+   port wants only the family calendar, it must filter **client-side** on each
+   event's own `calendarId` field. V1 keeps everything, and reports each event's
+   calendar, because a birthday is legitimately part of "what's on this week".
 
 ## Calendar identity
 
-The only calendar reference used anywhere is the string `calendar/{family_id}`,
-built locally from the discovery payload (family.ts:34,57). Evidence:
-`source-only`. No endpoint in the reference client returns a list of calendars,
-so:
-
-- there is no proof this is the server's own identifier rather than a convention
-  that happens to work;
-- there is no way to enumerate a family's calendars;
-- external/subscribed calendars cannot be discovered, only implied by the
-  `a01withExternal=true` flag on `evtsync`.
-
-P2 must confirm the derived ID is accepted before any calendar tool ships.
+`calendar/{family_id}` is confirmed as the family calendar's own identifier: the
+server stamps exactly that value on every ordinary event's `calendarId` field.
+A second calendar, `calendarSpecialDays/<accountId>`, surfaced for a birthday
+event. There is still no endpoint that enumerates a family's calendars — the set
+is discovered only by observing what the interval query returns.
 
 ## `evtlistinterval` — bounded range query
 
-The v1 read path. Evidence: `source-tested` (calendar-range.test.ts:10,30-34).
+The v1 read path. Evidence: `live-verified (2026-09-13)`.
 
-| Field | Value |
-| --- | --- |
-| `partnerScope` | `Family` |
-| `calendarId` | `calendar/{family_id}` |
-| `a00from` | ISO instant |
-| `a00to` | ISO instant |
-
-Response: a bare array, or an object under one of `events`, `datas`,
-`updatedCreated`, `results` (client.ts:438-452).
-
-Proven event fields (client.ts:830-848):
-
-| Field | Aliases | Notes |
+| Field | Value | Note |
 | --- | --- | --- |
-| eventId | `eventId`, `metaId` | identity |
-| text | `text` | title |
-| startDate | `startDate` | ISO datetime |
-| endDate | `endDate` | ISO datetime |
-| where | `where` | location |
-| description | `description` | free text |
-| color | `color` | inferred from the write path, not asserted on read |
+| `partnerScope` | `Family` | required |
+| `calendarId` | `calendar/{family_id}` | **ignored by the server**; sent for fidelity only |
+| `a00from` | ISO instant with offset, or a bare `YYYY-MM-DD` | epoch milliseconds are rejected with `502 Cannot parse date` |
+| `a00to` | as `a00from` | |
 
-**Nothing else is proven.** There is no evidenced field for: all-day status,
-timezone of the event, recurrence rule, recurrence parent/series ID, occurrence
-identity, exception or cancellation status, participants, calendar of origin, or
-owning family.
+Response: `a00.r.r` is a **bare array**. The object-wrapped variants in the
+reference client (`events`, `datas`, `updatedCreated`, `results`) were never
+observed; keep tolerant parsing, but the array is the real shape.
 
-### Boundary semantics — unresolved
+### Event fields — observed
 
-The TypeScript client resolves a date-only `a00to` to `23:59:59.999` local
-(client.ts:397-436). That is a client-side convention chosen to approximate an
-inclusive end; it says nothing about how the server treats the interval.
+Union of keys across 47 events:
 
-Specifically unknown (`pending-live`):
+`accountId`, `allDay`, `attendeeIds`, `attendees`, `bestMoment`,
+`birthDateNoYear`, `byDay`, `calendarId`, `clientOpId`, `color`, `colorInfo`,
+`comments`, `description`, `editable`, `emoji`, `endDate`, `eventId`,
+`eventMasterId`, `eventType`, `exdate`, `familyId`, `lastAction`,
+`lastActionAuthor`, `lastActionDate`, `medias`, `metaId`, `modifDate`, `moodMap`,
+`moodStarShortcut`, `occurenceIndex`, `private`, `recurrency`,
+`recurrencyDeletedOccurence`, `recurrencyEndDate`, `recurrencyExceptionOfId`,
+`recurrencyInterval`, `refPersonId`, `refPersonName`, `reminder`, `reminderList`,
+`rrule`, `startDate`, `text`, `timeZone`, `toAll`, `where`.
 
-1. whether `a00from`/`a00to` are inclusive or exclusive at each end;
-2. whether an event that *overlaps* the window but starts before `a00from` is
-   returned, or only events starting inside it;
-3. whether a multi-day or all-day event spanning the window is returned.
+The fields v1 depends on:
 
-Point 2 decides whether a "this week" answer is correct or silently missing the
-Monday-morning continuation of a Sunday-night event. The Python public contract
-uses half-open local ranges and a **boundary adapter** whose job is to translate
-that into whatever the server actually does — the adapter is a named, separately
-tested component precisely because its input is currently a guess.
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `eventId` / `metaId` | string | **Occurrence** identity. Distinct per occurrence of a series |
+| `eventMasterId` | string | Series identity. Equals `eventId` for non-recurring events |
+| `occurenceIndex` | string integer | Position within the series; `"0"` for non-recurring |
+| `text` | string | Title |
+| `startDate` / `endDate` | `YYYY-MM-DDTHH:MM:SS.sssZ` | Always UTC-stamped. See all-day below |
+| `allDay` | `"true"` / `"false"` | String, not boolean |
+| `timeZone` | IANA string | The event's own zone. **Absent on some events** (e.g. birthdays) |
+| `recurrency` | `NONE` / `WEEKLY` / … | Series frequency |
+| `rrule` | iCal RRULE | e.g. `FREQ=WEEKLY;UNTIL=20261021;INTERVAL=1;BYDAY=WE` |
+| `exdate` | array of instants | Excluded occurrence start instants |
+| `recurrencyDeletedOccurence` | array of string indexes | Excluded occurrence indexes |
+| `recurrencyExceptionOfId` | string | Present when this occurrence overrides a series entry |
+| `eventType` | `UNKNOWN` / `BIRTHDAY_ACCOUNT` / … | Treat as an open vocabulary; preserve unknown values |
+| `calendarId` | string | Source calendar of this event |
+| `where`, `description`, `color`, `attendeeIds` | — | As source-derived |
+
+Booleans are strings throughout, matching the list endpoints.
+
+### All-day encoding — settled, and the trap
+
+An all-day event is `allDay: "true"` with
+`startDate = <date>T00:00:00.000Z` and `endDate = <date>T23:59:59.000Z`.
+
+Those `Z` suffixes are **a lie about the timezone**. The event belongs to the
+local date in the date component; the instant is a carrier, not a moment. For a
+`Australia/Sydney` family, converting `2026-09-12T00:00:00.000Z` to local time
+yields 12 September 10:00, and converting the end yields 13 September 09:59 —
+placing a one-day event across two days.
+
+The normalisation rule is therefore mandatory and is the single most important
+line in this contract:
+
+> When `allDay` is `"true"`, take the **date component of the UTC timestamp
+> verbatim** as the local calendar date. Never convert an all-day instant through
+> a timezone.
+
+When `allDay` is `"false"`, `startDate` and `endDate` are genuine UTC instants
+and must be converted through the user's timezone normally.
+
+Only single-day all-day events were observed (`start` and `end` share a date).
+Multi-day all-day is expected to be the same encoding across two dates, but that
+is `pending-live`: the port must handle a differing start and end date, and a
+test week containing one is required before case 6 below can be marked passing.
+
+### Boundary semantics — settled
+
+Probed by querying windows around a known one-hour event:
+
+| Window relative to the event | Returned |
+| --- | --- |
+| strictly inside the event | **yes** |
+| ends exactly at the event's start | no |
+| ends one second after the event's start | **yes** |
+| starts exactly at the event's end | no |
+| starts one second before the event's end | **yes** |
+
+The rule is a clean half-open overlap:
+
+> an event is returned iff `event.startDate < a00to` **and** `event.endDate > a00from`
+
+This matches the Python public contract's half-open local range directly, so the
+boundary adapter is an identity transform rather than a correction layer. It is
+still a named, separately tested component, because it is the thing that would
+have to change if the server's behaviour ever drifted.
+
+The practical consequence for "this week": an event that started last Sunday
+night and runs into Monday **is** returned, so a week view must render partial
+overlaps rather than assume every event starts inside the window.
+
+### Recurrence — settled
+
+The server expands. A weekly series appears as one object per occurrence inside
+the window, each with its own `eventId` and an incrementing `occurenceIndex`,
+all sharing one `eventMasterId` and one `rrule`. A cancelled occurrence is simply
+not present; its index appears in the siblings' `recurrencyDeletedOccurence` and
+its start instant in their `exdate`.
+
+Binding consequences for P4:
+
+1. **Do not implement local recurrence expansion.** No recurrence library is
+   needed and none may be added.
+2. De-duplicate on `eventId`, never on `eventMasterId` — collapsing by series ID
+   would reduce a week's three soccer trainings to one.
+3. `exdate` and `recurrencyDeletedOccurence` are informational. Do not subtract
+   them again; the server has already applied them, and re-applying would delete
+   a legitimate occurrence.
+4. `recurrencyExceptionOfId` marks a modified occurrence, which arrives already
+   modified. Preserve the field; no special handling is required for a read.
+
+### Result size
+
+No cap was observed: 41 events over 30 days, 109 over 90, 471 over 365 and 1115
+over 1095. There is no continuation mechanism, so a cap — if one exists — would
+be silent. The port therefore bounds its own request window (proposed 31 days per
+call) and its own output size, and reports a reached bound as partial.
 
 ### Timezone handling
 
@@ -100,38 +203,14 @@ other families can appear in calendar data at all — which means the port must
 assume `evtlistinterval` may return objects that are not plain events, and
 preserve rather than discard what it does not recognise.
 
-## Recurrence — the open blocker
+## Superseded sections
 
-The *write* path sends `recurrency` (default `NONE`), `recurrencyInterval`,
-`byDay`, `byMonthDay`, `recurrencyEndDate` (client.ts:739-753). This proves the
-server models recurrence, and gives the vocabulary. It does **not** establish:
-
-- what a recurring series looks like when read back;
-- whether `evtlistinterval` returns one master object or expanded occurrences
-  inside the window;
-- how an occurrence is identified distinctly from its series;
-- how a modified or cancelled single occurrence is represented.
-
-Two possible worlds, with opposite implementations:
-
-| If the server… | Then the port… |
-| --- | --- |
-| expands occurrences inside the interval | consumes them directly; needs only occurrence-aware de-duplication |
-| returns series masters | must expand locally with a maintained recurrence library, plus exception handling — a separate, separately reviewed piece of work |
-
-Choosing between these from source is not possible. P4 must therefore be planned
-with the expansion path as a *conditional* sub-task, and a weekly overview must
-not be described as complete until the answer is known. A week that silently
-omits a recurring school pickup is worse than one that says it is unsure.
-
-## All-day events — the second open blocker
-
-No evidenced field. The candidates are a boolean flag, a date-only `startDate`,
-or a midnight-to-midnight instant pair, and they are not interchangeable: a
-midnight-to-midnight instant pair converted through a timezone shifts an all-day
-event onto the wrong day. Until a live payload settles this, the normaliser must
-preserve the raw start/end representation alongside its parsed form so the
-decision can be made from data rather than reversed later.
+The P0 draft carried two sections headed "the open blocker" — recurrence and
+all-day encoding. Both were answered by the 02P probe and have been removed
+rather than left to contradict the live findings above. The write-path
+recurrence vocabulary they recorded (`recurrency`, `recurrencyInterval`,
+`byDay`, `byMonthDay`, `recurrencyEndDate`) is still accurate and still belongs
+to P8; the live `rrule` field is the read-path equivalent.
 
 ## Mutations — excluded from v1
 
@@ -147,32 +226,42 @@ Calendar writes belong to P8 and only after recurrence semantics are proven.
 
 ## Test cases the port must satisfy
 
-Derived from the above, independent of which world we land in:
+Case 12 is now representable and cases 5 and 6 have a settled encoding.
 
-1. Sydney spring-forward and fall-back weeks resolve to 7 local days.
-2. A second timezone produces different absolute bounds for the same local week.
-3. Sunday-start and Monday-start week configurations.
-4. An event crossing midnight appears on both days.
-5. An event crossing the week boundary appears in both weeks.
-6. A multi-day all-day event appears on every day it covers.
-7. An explicit UTC offset in input is honoured; a naive datetime is rejected.
-8. An unparseable event does not discard the whole response.
-9. An unrecognised object type is preserved, not dropped.
-10. Truncation is reported as partial, never presented as a complete week.
-11. Empty-but-successful is distinguishable from failed-to-fetch.
-12. A cancelled occurrence of a series is not shown (once representable).
+| # | Case | Status |
+| --- | --- | --- |
+| 1 | Sydney spring-forward and fall-back weeks resolve to 7 local days | writable now |
+| 2 | A second timezone produces different absolute bounds for the same local week | writable now |
+| 3 | Sunday-start and Monday-start week configurations | writable now |
+| 4 | An event crossing midnight appears on both days | writable now |
+| 5 | An event crossing the week boundary appears in both weeks | writable now — the server returns overlaps |
+| 6 | A multi-day all-day event appears on every day it covers | writable from the encoding; **live confirmation still pending** — only single-day all-day events were observed |
+| 7 | An explicit UTC offset is honoured; a naive datetime is rejected | writable now |
+| 8 | An unparseable event does not discard the whole response | writable now |
+| 9 | An unrecognised `eventType` or object is preserved, not dropped | writable now — `BIRTHDAY_ACCOUNT` is a real example |
+| 10 | A reached fetch bound is reported as partial, never as a complete week | writable now |
+| 11 | Empty-but-successful is distinguishable from failed-to-fetch | writable now |
+| 12 | A cancelled occurrence of a series is not shown | writable now — the server omits it; the test asserts we do **not** re-subtract `exdate` |
+| 13 | All-day dates are taken verbatim and never timezone-converted | **new, and the highest-value test in the suite** |
+| 14 | Occurrences of one series are not collapsed by `eventMasterId` | **new** |
 
-Cases 6 and 12 cannot be written as passing tests until the corresponding
-`pending-live` questions are answered; they are recorded now so they are not
-quietly dropped from the acceptance matrix.
+## Open questions
 
-## Open questions (`pending-live`)
+Answered by the 02P probe on 2026-09-13 and moved into the live-verified
+sections above: calendar ID validity, boundary inclusivity, overlap, all-day
+encoding, recurrence expansion, occurrence identity, cancellation, foreign
+object types, and result caps.
 
-1. Is `calendar/{family_id}` accepted, and how are other calendars enumerated?
-2. Are interval bounds inclusive or exclusive?
-3. Are overlapping events returned, or only events starting inside the window?
-4. How is an all-day event encoded?
-5. Does the interval call expand recurring occurrences?
-6. How is an occurrence identified, and how is a cancelled one represented?
-7. Do tasks, meals or external-calendar items appear in interval results?
-8. Is there a result cap, and any continuation mechanism?
+Still `pending-live`:
+
+1. **Multi-day all-day encoding.** Expected to be `<startdate>T00:00:00.000Z`
+   to `<enddate>T23:59:59.000Z`, but not observed. Needs a deliberately created
+   test event.
+2. **Whether `eventType` has values beyond `UNKNOWN` and `BIRTHDAY_ACCOUNT`,**
+   and whether tasks or meals appear in interval results. `evtsync`'s flags say
+   they can appear somewhere; they did not appear here. Unknown types are
+   preserved, so this is a presentation question, not a correctness one.
+3. **Whether a silent result cap exists** above 1115 events. The port bounds its
+   own window regardless.
+4. **Every write path.** No calendar mutation has been observed live and none is
+   in v1.

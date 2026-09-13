@@ -3,7 +3,7 @@
 What has actually been verified, and by what means. Keep this table honest: a
 row moves to a positive result only when the stated check was executed.
 
-Last updated 2026-09-13 by P0.
+Last updated 2026-09-13 by task 02P (read-only live probe).
 
 ## Server-side
 
@@ -42,15 +42,25 @@ No client has connected to this server. Every row is outstanding.
 
 ## FamilyWall upstream
 
-No FamilyWall call has been made by this project. All wire knowledge is
-source-derived from the pinned TypeScript client; see
-[contracts](contracts/familywall.md) for per-endpoint evidence levels and the
-list of questions that need a live account.
+A read-only live probe (task 02P) ran on 2026-09-13 against
+`https://api.familywall.com/api` with a real account supplied outside Git. No
+write endpoint was called. Findings are recorded in
+[contracts](contracts/familywall.md) and [calendar](contracts/calendar.md).
 
 | Check | Status |
 | --- | --- |
-| Login handshake against live service | **pending** — P2 |
-| Family/calendar discovery for a real account | **pending** — P2 |
-| Derived `calendar/{family_id}` accepted | **pending** — P2 |
-| Shopping add/check/uncheck round trip | **pending** — P3 |
+| Login handshake against live service | **pass** — 2026-09-13; `JSESSIONID` cookie plus a mandatory `tokencsrf` header; `webset`/`webget` unnecessary |
+| Login failure is distinguishable | **pass** — 2026-09-13; `a00.ex.ex` / `FiZClassId 3` / `bad password` |
+| Expired-session presentation | **pass** — 2026-09-13; HTTP 200 with `a00.un.un` / `501` / `NOAUTHENT`, not 401 and not HTML |
+| Family/calendar discovery for a real account | **pass** — 2026-09-13; single family object, `family_id` + `metaId` + `members[]` with IANA `timeZone` |
+| Derived `calendar/{family_id}` accepted | **pass with a caveat** — 2026-09-13; it is the server's own calendar ID, but the request parameter is **ignored** and does not scope or filter anything |
+| List read shapes | **pass** — 2026-09-13; bare arrays, `taskList/<id>` and `task/<id>` identities, types `SHOPPING_LIST`/`TODOS`/`OTHER` |
+| Item `quantity` readable | **fail** — 2026-09-13; no quantity key on any of 85 items across four lists |
+| Calendar recurrence expansion | **pass** — 2026-09-13; server expands occurrences; no local expansion needed |
+| Calendar all-day encoding | **pass** — 2026-09-13; `allDay:"true"` with a UTC-stamped date that must not be timezone-converted |
+| Calendar boundary semantics | **pass** — 2026-09-13; half-open overlap, `start < to && end > from` |
+| Multi-day all-day event | **pending** — needs a deliberately created test event |
+| Multi-family account discovery | **pending** — the probe account has one family |
+| Shopping add/check/uncheck round trip | **pending** — P3, a write, needs a disposable test list |
+| `taskcreate` / `taskmark` response shapes | **pending** — P3; both are writes and were excluded from the read-only probe |
 | Known test week matches the FamilyWall UI | **pending** — P4 |

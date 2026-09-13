@@ -1,9 +1,10 @@
 # FamilyWall wire contract
 
-Status: **source-derived**. Produced by P0 task 00A on 2026-09-13 from the pinned
-TypeScript client at `familywall-api@c85bb152115d3c41ab90322ef9dce732122ff4c0`.
-No call in this document has been observed against the live service by this
-project. See [calendar contract](calendar.md) for calendar semantics and
+Status: **source-derived, with a live-verified core**. Produced by P0 task 00A on
+2026-09-13 from the pinned TypeScript client at
+`familywall-api@c85bb152115d3c41ab90322ef9dce732122ff4c0`, then corrected by the
+02P read-only live probe on 2026-09-13. Where the two disagree, the
+[live verification section](#live-verification--02p-probe-2026-09-13) wins. See [calendar contract](calendar.md) for calendar semantics and
 [research](../research.md) for the wider evidence base.
 
 ## Evidence levels
@@ -13,9 +14,7 @@ project. See [calendar contract](calendar.md) for calendar semantics and
 | `source-tested` | The pinned repository has an offline test asserting the request fields or parsed shape. It proves what that client sends and accepts, not what the server returns today. |
 | `source-only` | Present in client code with no test. Request construction is readable; response shape is the author's assumption. |
 | `pending-live` | Cannot be settled without an authorised FamilyWall test account. |
-
-`source-tested` is the ceiling available offline. Nothing here may be labelled
-live-verified until P2's opt-in probe runs.
+| `live-verified` | Observed against the live service by this project's own probe, with the date. Read paths only; no write endpoint has been observed. |
 
 ## Transport
 
@@ -44,6 +43,132 @@ A Python port must therefore treat HTTP 200 as inconclusive and inspect the
 envelope before deciding success. Six distinct failures must be separable:
 non-2xx HTTP, HTML body (session expiry / login page), invalid JSON, envelope
 missing `a00`, `a00.ex` present, and `a00.r.r` of an unexpected shape.
+
+## Live verification — 02P probe, 2026-09-13
+
+A throwaway, read-only probe ran against `https://api.familywall.com/api` with a
+real account supplied outside Git. No write endpoint was called. Only key names,
+structural shapes, enum values and date semantics were retained; every free-text
+value, name, title and identifier was hashed before display and none of it is
+recorded here. The script was discarded.
+
+Items below are `live-verified (2026-09-13)`. They **supersede** the
+source-derived statements they contradict.
+
+### Corrections to the source-derived contract
+
+| Source-derived claim | Live result |
+| --- | --- |
+| Failure is `a00.ex` | Two distinct failure envelopes exist: `a00.un.un` and `a00.ex.ex` (below) |
+| Send `JSESSIONID` as the `tokencsrf` header | A `tokencsrf` header is **mandatory**; login returns its own `tokenCsrf` value, which is what the port sends |
+| List types are `SHOPPING` / `TODO` / `OTHER` | Read responses use `SHOPPING_LIST` / `TODOS` / `OTHER` |
+| Items carry a `quantity` field | No quantity-like key appears on any read item across four lists (85 items). Treat quantity as unproven |
+| A browser `User-Agent` is required | **Withdrawn.** An authenticated call succeeds with no `User-Agent`, with the httpx default, and with a browser string. The earlier `502` was a missing `tokencsrf`, misattributed |
+
+### Authentication — settled
+
+- `log2in` succeeds with the documented fields and sets three cookies:
+  `AWSALB`, `AWSALBCORS` and `JSESSIONID`. Only `JSESSIONID` is required; the two
+  load-balancer cookies can be dropped and calls still succeed.
+- The login result `a00.r.r` carries `accountId`, `tokenCsrf` (32 chars),
+  `genericAutologinToken`, `hasFamily` and terms flags.
+- **Every authenticated call must send a `tokencsrf` request header.** Omitting it
+  returns `a00.un.un` with `message: "Wrong anti csrf token=null"`. Both the
+  login `tokenCsrf` and the `JSESSIONID` value are accepted; the port sends the
+  login `tokenCsrf`, because that is the value the server names.
+- `webset` / `webget` are **not** required. Discovery, list and calendar calls all
+  succeed immediately after `log2in` without them. Do not port them.
+- The static analytics cookies and the constant browser `deviceId` are confirmed
+  unnecessary. Do not port them.
+
+### Envelope — settled
+
+Success: `{"aNN": {"r": {"r": <result>}, "cn": "<endpoint>"}}`.
+
+Failure comes in two shapes, both with **HTTP 200** and both carrying
+`FiZClassId` (a server-side class code as a string) and a `message`:
+
+| Shape | Observed `FiZClassId` | Observed meaning |
+| --- | --- | --- |
+| `aNN.un.un` | `501` | Not permitted for this session — missing/expired auth, missing CSRF header |
+| `aNN.un.un` | `502` | Request rejected — malformed identifier, unparseable date |
+| `aNN.ex.ex` | `3` | Application error — e.g. `bad password` on `log2in` |
+
+`aNN.cn` echoes the endpoint name and is a useful error label. `message` is a
+server diagnostic string; it may be logged as an endpoint-scoped label but must
+never be returned verbatim to a model or user.
+
+An **expired or invalid session presents as HTTP 200 JSON**, not 401 and not an
+HTML login page: `a00.un.un` / `501` / `"Api <endpoint> is not allowed by ruleset
+NOAUTHENT"`. The HTML-body failure mode was not observed; keep the branch, but the
+`NOAUTHENT` envelope is the reauthentication trigger the client must detect.
+
+### Discovery — settled
+
+`accgetallfamily` with `a01call=prfgetProfiles` and no device fields succeeds.
+`a00.r.r` is a **single object, not an array**, with keys:
+
+`coverDefault`, `coverMedias`, `coverUri`, `deletedProfiles`, `family_id`,
+`invitations`, `isFirstFamily`, `medias`, `members`, `metaId`, `name`,
+`pictureDefault`, `wallCounter`.
+
+- `family_id` is a bare numeric string; `metaId` is the prefixed form
+  `family/<family_id>`.
+- `members[]` entries carry `accountId`, `firstName`, `name`, `role`, `right`,
+  `color`, `timeZone` (IANA, e.g. `Australia/Sydney`), `familyId` and
+  `isloggedaccount`. `isloggedaccount` identifies the authenticated member.
+- `a01` returns profiles keyed by account ID.
+
+Because `a00.r.r` is one object, this endpoint gives **no way to enumerate several
+families**, which reinforces the single-family rule rather than weakening it. The
+probe account has exactly one family, so the multi-family branch is still
+`pending-live`: the port must keep refusing rather than guessing, and must not
+assume the payload would become an array.
+
+### Lists — settled
+
+`taskgettasklists` (only `partnerScope=Family`) returns `a00.r.r` as a **bare
+array**. Per list, the observed keys are:
+
+`accountId`, `alexa`, `bestMoment`, `clientOpId`, `color`, `comments`,
+`completedHidden`, `creationDate`, `emoji`, `familyId`, `lastAction`,
+`lastActionAuthor`, `lastActionDate`, `medias`, `metaId`, `moodMap`,
+`moodStarShortcut`, `name`, `remainingTaskNumber`, `rights`, `sharedMemberIds`,
+`sharedToAll`, `sortingIndex`, `taskCategoriesHidden`, `taskListType`,
+`taskSorting`, `totalTaskNumber` (system lists add `systemId` and
+`pinSortingIndex`).
+
+- Identity is `metaId`, of the form `taskList/<id>`. No `taskListId` / `listId` /
+  `id` alias was returned.
+- `taskListType` observed values: `SHOPPING_LIST`, `TODOS`, `OTHER`. The
+  source-derived `SHOPPING` / `TODO` vocabulary belongs to the **write** path
+  (`taskcreatelist`) and must not be used to interpret reads.
+- Counts are `totalTaskNumber` and `remainingTaskNumber` (remaining, not checked).
+  `itemCount` / `checkedCount` were not returned.
+- Booleans arrive as the **strings** `"true"` / `"false"` throughout.
+
+`tasklist` with `a00listId=<metaId>` returns `a00.r.r` as a **bare array** of
+items with keys:
+
+`accountId`, `assignee`, `assigneeIds`, `bestMoment`, `categories`, `clientOpId`,
+`comments`, `complete`, `completedDate`, `creationDate`, `description`,
+`editable`, `familyId`, `lastAction`, `lastActionAuthor`, `lastActionDate`,
+`medias`, `metaId`, `modifDate`, `moodMap`, `moodStarShortcut`, `recurrency`,
+`recurrencyDeletedOccurence`, `reminder`, `sortingIndex`, `taskCategoryId`,
+`taskId`, `taskListId`, `text`, `toAll`.
+
+- Identity is `metaId` of the form `task/<id>`; `taskId` is the bare numeric form
+  and `taskListId` is the owning list's `metaId`. **`taskListId` on the item is
+  what lets the service verify membership before `taskmark`.**
+- `complete` is the string `"false"` / `"true"`.
+- `categories` are objects with `name` and a `system` string flag.
+- **No quantity field was returned on any item.** Quantity remains a write-path
+  parameter with no evidenced read-back, so a quantity a tool writes may not be
+  observable. This must be stated as a limitation rather than assumed to work.
+
+A malformed list identifier returns `a00.un.un` / `502` /
+`"No enum constant com.jeronimo.fiz.api.common.MetaIdTypeEnum.<prefix>"`, which
+confirms identifiers are prefix-typed and are validated server-side.
 
 ## Session handshake
 
@@ -231,14 +356,31 @@ isolation across redirects and a read-time size limit), and
 `webgetWebSocketUrl`. Meals, recipes, categories and ingredient transfer have
 endpoint names only and no contracts at all.
 
-## Open questions (`pending-live`)
+## Open questions
 
-1. Is `JSESSIONID` alone sufficient, or are further cookies/headers required?
-2. Are `webset`/`webget` required for list and calendar calls, or login-only?
-3. What does the session's family resolve to for an account in several families,
-   and can it be changed?
-4. Is the derived `calendar/{family_id}` calendar ID accepted?
-5. What does `taskmark` actually return?
-6. How does an expired session present — HTTP 401, an HTML login page, or an
-   `a00.ex` envelope?
-7. Do list responses truncate, and is there any continuation mechanism?
+Answered by the 02P probe on 2026-09-13, now `live-verified`:
+
+1. ~~Is `JSESSIONID` alone sufficient?~~ `JSESSIONID` **plus** a `tokencsrf`
+   header. Nothing else.
+2. ~~Are `webset`/`webget` required?~~ No.
+3. ~~What does `taskmark` return?~~ Still unanswered — deferred, see below.
+4. ~~How does an expired session present?~~ HTTP 200 with
+   `a00.un.un` / `501` / `NOAUTHENT`.
+5. ~~Do list responses truncate?~~ No cap observed: a list with 780 items
+   returned in full, and a 1095-day calendar window returned 1115 events. No
+   continuation mechanism exists or appears necessary. The port still bounds its
+   own request windows and output size.
+
+Still `pending-live`:
+
+1. **What does `taskmark` actually return, and what does `taskcreate` return?**
+   Both are writes and the 02P probe was read-only. They are answered by the P3
+   controlled live acceptance in a disposable test list, not by another probe.
+2. **Is `quantity` writable and readable at all?** No read evidence exists. P3
+   must write a quantity and re-read it before any tool advertises the field.
+3. **What does discovery return for an account in more than one family?** The
+   probe account has one. `a00.r.r` is an object, so the multi-family shape is
+   unknown. The single-family rule stands and must fail closed on anything
+   unexpected.
+4. **Does the session's family ever change, and can it be selected?** No
+   selector was found and none was tested.
