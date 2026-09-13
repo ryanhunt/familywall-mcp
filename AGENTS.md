@@ -40,11 +40,11 @@ same policy.
    user. Ask only when a missing choice would materially change the requested
    result or an external action requires new authority.
 6. For a change that affects runtime behaviour, add or update meaningful tests
-   and run the project-defined checks. At the current foundation stage there
-   is no runtime, test, lint, type-check, or package-install command to run;
-   report that fact instead of claiming a passing command. A plan may propose
-   future commands before implementation defines them, but they must be marked
-   proposed or unavailable until the foundation provides them.
+   and run the project-defined checks. Phase 1 now provides `uv sync --frozen
+   --group dev`, `uv run ruff check .`, `uv run ruff format --check .`,
+   `uv run mypy src`, `uv run pytest -m 'not live'`, `uv build`, and
+   `scripts/check`. Live tests remain opt-in and no FamilyWall tools, OAuth
+   provider, or upstream endpoint behavior is implemented yet.
 
 ## Security and data handling
 

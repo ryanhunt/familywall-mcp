@@ -20,6 +20,8 @@ dist/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.uv-cache/
+*.whl
 
 # Local authentication, browser, and request captures
 cookies.json

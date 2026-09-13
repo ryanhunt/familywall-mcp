@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+set -eu
+
+UV_CACHE_DIR="${UV_CACHE_DIR:-${TMPDIR:-/tmp}/familywall-uv-cache}"
+export UV_CACHE_DIR
+
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src
+uv run pytest -m 'not live'
+uv build
+uv run detect-secrets scan --baseline .secrets.baseline --all-files \
+  --exclude-files '(^|/)(uv\.lock|\.git/|\.venv/|\.mypy_cache/|\.pytest_cache/|\.ruff_cache/|\.uv-cache/|dist/)' \
+  >/dev/null
