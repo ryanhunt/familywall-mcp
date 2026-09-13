@@ -335,9 +335,15 @@ led this contract to state that no such endpoint exists. That was wrong. The web
 client declares `taskdelete(["taskId"])` and
 `taskupdate(["taskId","text","dueDate","assignee","reminder"])`.
 
-Neither has been exercised against the live service by this project, so both are
-evidence level `source-only` (web client). They remain outside v1 scope, but
-cleanup of test items no longer necessarily requires the FamilyWall UI.
+`taskdelete` is now **`live-verified` (2026-09-14)**: 13 test items created
+during the write check were deleted by `taskdelete` with `a00taskId`, all 13
+returned a success envelope, and a verification re-read found none remaining.
+Deletion is immediate and there is no trash or undo, so it must never be offered
+as a v1 tool without an explicit confirmation design.
+
+`taskupdate` remains `source-only` (web client) and unexercised. Both stay
+outside v1 scope, but cleanup of test items no longer requires the FamilyWall
+UI.
 
 ## Mutation acknowledgement
 
