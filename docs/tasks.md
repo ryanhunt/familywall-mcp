@@ -33,7 +33,7 @@ check fails instead of reopening the entire phase.
 | 00B | Calendar live-semantics evidence | none | Luna evidence + lead review |
 | 00C | SDK and self-hosted OAuth decision/spike | none | Lead-directed Luna + lead decision |
 | 01A | Package/config/model foundation | 00A, 00C | done: PR #1, docs/handoffs/phase1-foundation.md |
-| 01B | Offline harness and CI | 01A | done: PR #1, docs/handoffs/phase1-foundation.md |
+| 01B | Offline harness and checks | 01A | done: PR #1, docs/handoffs/phase1-foundation.md |
 | 02A | Transport, login and error handling | 01B | Luna |
 | 02B | Discovery, family context and sessions | 02A, 00A | Luna + lead isolation review |
 | 03A | List API adapters | 02B | Luna |
@@ -99,14 +99,15 @@ The lead integrates completed changes and reruns affected checks before downstre
 - Accept: clean installation/build; hosted settings fail closed; no env dump; explicit
   stdio principal; unknown family context cannot masquerade as validated context.
 
-### 01B — Test harness and CI
+### 01B — Test harness and checks
 
 - Own: tests/support, initial config tests, lint/type/test/build configuration,
-  `scripts/check`, `.github/workflows/`, update contribution check instructions.
+  `scripts/check`, update contribution check instructions.
 - Deliver: unexpected-request rejection, fake time, synthetic envelopes and identities,
-  network-disabled default tests, secret scanning and locked CI install.
+  network-disabled default tests, secret scanning and a locked frozen install.
 - Accept: real baseline tests detect bad config and malformed envelopes; checks run on
-  a fresh checkout; no “live tests” in ordinary CI; no placeholder green test suite.
+  a fresh checkout; no “live tests” in the default run; no placeholder green test
+  suite.
 
 ### 02A — HTTP and session handshake
 
@@ -238,8 +239,8 @@ The lead integrates completed changes and reruns affected checks before downstre
 - Own: docs/compatibility.md, acceptance evidence, README/operator runbooks.
 - Deliver: P7 matrix run in real ChatGPT and Claude, at least two users, supported
   tools/scopes and truthful remaining limitations.
-- Accept: all mandatory rows pass; no mock-only row labelled live; clean established
-  CI; no secret-bearing screenshots/logs in commits. Report release readiness and
+- Accept: all mandatory rows pass; no mock-only row labelled live; a clean local
+  `scripts/check` run; no secret-bearing screenshots/logs in commits. Report release readiness and
   any explicit blocker. Commit, push, deployment and publication require the user's
   requested delivery scope; do not infer completion from an available container image.
 
