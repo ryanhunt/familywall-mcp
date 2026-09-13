@@ -84,3 +84,54 @@ class UnexpectedRequestError(FamilyWallError):
         "The requested upstream operation is not allowed by this test harness.",
         "Update the synthetic contract before making this request.",
     )
+
+
+class SessionExpiredError(AuthenticationError):
+    """The upstream session is no longer accepted.
+
+    Observed live as HTTP 200 with ``a00.un.un`` / ``501`` / ``NOAUTHENT``.
+    """
+
+    default = ErrorInfo(
+        "session_expired",
+        "The FamilyWall session is no longer valid.",
+        "The server will sign in again; if this persists, reconnect the account.",
+    )
+
+
+class UpstreamRejectedError(FamilyWallError):
+    """The upstream accepted the request and refused it (``un``/``ex`` envelope)."""
+
+    default = ErrorInfo(
+        "upstream_rejected",
+        "FamilyWall rejected the request.",
+        "Check the request details; if it persists, the endpoint contract may have changed.",
+    )
+
+
+class MalformedPayloadError(FamilyWallError):
+    """A parsed envelope did not contain the shape this endpoint's contract requires."""
+
+    default = ErrorInfo(
+        "malformed_upstream_payload",
+        "FamilyWall returned data this server could not interpret.",
+        "Report the endpoint; the upstream contract may have changed.",
+    )
+
+
+class UnsupportedConfigurationError(FamilyWallError):
+    """A real account state this project deliberately refuses to guess about."""
+
+    default = ErrorInfo(
+        "unsupported_configuration",
+        "This account is in a configuration this server does not support.",
+        "See the documented limitations; no action was taken.",
+    )
+
+
+class RateLimitedError(FamilyWallError):
+    default = ErrorInfo(
+        "upstream_rate_limited",
+        "FamilyWall is rate limiting this account.",
+        "Wait before retrying; no automatic retry was attempted.",
+    )
