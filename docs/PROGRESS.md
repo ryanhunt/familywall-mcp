@@ -26,8 +26,10 @@ deferred until the stdio server works end to end.
 | P3 | 03B list selection and mutation service | `services/lists.py`, `storage/memory.py` | **done**: `1382d8f` |
 | P3 | 03C shopping MCP tools | `tools/` | not started |
 | P4 | 04A calendar adapters and local ranges | `familywall/calendar.py`, `services/ranges.py` | **done**: `e4170c2` |
-| P4 | 04B weekly overview service | `services/calendar.py` | delegated |
-| P3/P4 | MCP tool surface and stdio server | `tools/`, `server.py` | lead, next |
+| P4 | 04B weekly overview service | `services/calendar.py` | **done**: `3effb9a` |
+| — | 05 adapter, MCP tools, stdio server | `services/transport.py`, `tools/`, `server.py` | **done**: `69a0951` |
+| — | **Live stdio check, read-only** | verified 2026-09-14 | **done** |
+| P3 | Live write check (`taskcreate`/`taskmark`) | — | **blocked: needs the user's go-ahead and a disposable list** |
 | — | stdio server entry point and local smoke test | `server.py`, `cli.py` | not started |
 | P5 | Storage, invites, OAuth | — | deferred until stdio works |
 | P6 | Containers and HTTPS | — | deferred until stdio works |
@@ -80,6 +82,37 @@ needed at least one correction round, and three defect classes recurred:
    the project's own `TransportError`, which subclasses none of them — so a lost
    write would have propagated instead of yielding `unknown`. Caught only by
    checking the class hierarchy directly.
+
+## How to run it locally
+
+```
+FAMILYWALL_MODE=stdio
+FAMILYWALL_LOCAL_SUBJECT=<any stable local id>
+FAMILYWALL_BASE_URL=https://api.familywall.com
+FAMILYWALL_EMAIL=<account email>
+FAMILYWALL_PASSWORD=<account password>
+FAMILYWALL_ENABLE_WRITES=false
+```
+
+Then `uv run familywall-mcp serve`, which speaks MCP over stdio. Six tools are
+exposed: `get_connection_status`, `list_shopping_lists`, `get_list_items`,
+`get_week_overview`, `add_list_item` and `set_list_item_checked`.
+
+**The write gate is off by default and must stay off until a live write check
+has been run deliberately.** With it off, the two write tools are still listed
+but refuse before any upstream request with `writes_disabled`.
+
+### Live verification, 2026-09-14
+
+A real MCP client drove the server over stdio against a live account. Observed:
+initialize succeeded; six tools listed; no tool schema accepts a credential,
+subject, principal or family parameter; connection status, lists, list items and
+a week overview all returned real data; the resolved timezone was
+`Australia/Sydney` from discovery, not a hard-coded default; recurrence arrived
+expanded (11 occurrences across 9 series ids in one week). Both write tools
+refused with `writes_disabled`, and an endpoint audit of the whole run recorded
+only `taskgettasklists`, `tasklist` and `evtlistinterval` — no write endpoint was
+reached.
 
 ## Still `pending-live`
 
