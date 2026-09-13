@@ -7,14 +7,19 @@ The first release will support shopping-list additions and completion, plus a
 timezone-aware view of the family's week. A few invited family members will each
 have a self-hosted MCP login linked to their own encrypted FamilyWall credentials.
 
-**Current status:** the Phase 1 typed Python foundation and offline test harness
-are implemented. The MCP server, FamilyWall client/tools, and login flow are not
-implemented or tested against a live FamilyWall account.
+**Current status:** P0 contract and SDK discovery is complete, and the Phase 1
+typed Python foundation and offline test harness are implemented. The MCP server,
+FamilyWall client/tools, and login flow are not implemented or tested against a
+live FamilyWall account. The next step is a read-only live probe to answer the
+questions that source reading cannot.
 
 - [Implementation plan](docs/implementation-plan.md): phases, dependencies and release acceptance.
 - [Delegable task cards](docs/tasks.md): bounded work and copyable prompts for cheaper agents.
 - [Architecture](docs/architecture.md): account mapping, credentials, tools and deployment.
 - [Research](docs/research.md): pinned repository evidence and unresolved API behavior.
+- [Wire contracts](docs/contracts/familywall.md) and [calendar contracts](docs/contracts/calendar.md): endpoint-level evidence levels.
+- [ADR 0001](docs/decisions/0001-auth-and-sdk.md): the MCP SDK and self-hosted OAuth decision.
+- [Compatibility](docs/compatibility.md): what has actually been verified, and how.
 - [AI workflow](docs/agent-workflow.md): shared Claude Code/Codex conventions.
 - [Contributing](CONTRIBUTING.md): workflow and validation commands.
 

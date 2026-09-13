@@ -1,9 +1,10 @@
 # Delegable implementation tasks
 
-Status: Phase 1 tasks 01A and 01B are **done** on PR #1; P0 contract/SDK
-decisions and all later runtime tasks remain not started. Update this file with
-task status, commit/PR and acceptance evidence as work lands. See [phase
-plan](implementation-plan.md).
+Status: P0 tasks 00A/00B/00C are **done** (contracts, calendar contract and
+ADR 0001); Phase 1 tasks 01A and 01B are **done** on PR #1. The next ready task
+is **02P**, the read-only live probe. All other runtime tasks are not started.
+Update this file with task status, commit/PR and acceptance evidence as work
+lands. See [phase plan](implementation-plan.md) and [PROGRESS](PROGRESS.md).
 
 ## Copyable delegation prompt
 
@@ -29,13 +30,14 @@ check fails instead of reopening the entire phase.
 
 | ID | Deliverable | Depends on | Suggested implementer |
 | --- | --- | --- | --- |
-| 00A | FamilyWall wire contract and family context | none | Luna reconnaissance |
-| 00B | Calendar live-semantics evidence | none | Luna evidence + lead review |
-| 00C | SDK and self-hosted OAuth decision/spike | none | Lead-directed Luna + lead decision |
+| 00A | FamilyWall wire contract and family context | none | done: docs/contracts/familywall.md |
+| 00B | Calendar semantics evidence | none | done: docs/contracts/calendar.md |
+| 00C | SDK and self-hosted OAuth decision/spike | none | done: docs/decisions/0001-auth-and-sdk.md |
 | 01A | Package/config/model foundation | 00A, 00C | done: PR #1, docs/handoffs/phase1-foundation.md |
 | 01B | Offline harness and checks | 01A | done: PR #1, docs/handoffs/phase1-foundation.md |
+| 02P | Read-only live probe | 00A, 00B, test account | **next**: lead only, live credentials |
 | 02A | Transport, login and error handling | 01B | Luna |
-| 02B | Discovery, family context and sessions | 02A, 00A | Luna + lead isolation review |
+| 02B | Discovery, family context and sessions | 02A, 00A, 02P | Luna + lead isolation review |
 | 03A | List API adapters | 02B | Luna |
 | 03B | List selection and mutation service | 03A | Luna + lead receipt review |
 | 03C | Shopping MCP tools | 03B | Luna |
@@ -53,40 +55,37 @@ Do not concurrently edit shared models, dependency files or app wiring. Safe par
 work after 02B: list adapters, calendar adapters, and storage in their own directories.
 The lead integrates completed changes and reruns affected checks before downstream tasks.
 
-## P0 cards
+## P0 cards — complete
 
-### 00A — Wire contracts and family context
+| ID | Output | Key result |
+| --- | --- | --- |
+| 00A | [familywall.md](contracts/familywall.md) | Family scope is session-global; no family selector exists in any list or calendar request |
+| 00B | [calendar.md](contracts/calendar.md) | Only six event fields proven; all-day, recurrence, occurrence identity and cancellation have no evidence |
+| 00C | [ADR 0001](decisions/0001-auth-and-sdk.md), [compatibility.md](compatibility.md) | `mcp` 2.2.0 mounts the full OAuth endpoint surface from a provider; embed the authorization server, no Authlib |
 
-- Read: research.md; pinned TS client/family/types and list tests.
-- Own: `docs/contracts/familywall.md`, attribution notes under `docs/decisions/`.
-- Deliver: exact login/discovery/list fields, variants/errors and evidence levels;
-  distinguish account/family/calendar IDs and determine active-family selection.
-- Accept: no guessed parameters; no “complete” pagination claims without evidence;
-  unsupported family switching is explicitly blocked; original notices identified
-  before copying substantial source. If live access is unavailable, report the exact
-  missing observation and let independent offline tasks proceed.
+Do not redo these from the TypeScript source. The remaining unknowns need a live
+account, not another source read.
 
-### 00B — Calendar behavior evidence
+### 02P — Read-only live probe
 
-- Read: pinned calendar-range tests, legacy create/update code, research.md.
-- Own: calendar section of contract (coordinate with 00A) or a separate
-  `docs/contracts/calendar.md`, synthetic case descriptions.
-- Deliver: boundaries, timezone/all-day format, overlap, recurrence, exceptions,
-  calendar IDs, external-calendar visibility and completeness behavior.
-- Accept: each assertion labelled source-only/mock/live; one test-week comparison
-  when authorized test-family access exists. No calendar mutation implementation.
-  Missing recurring-event behavior remains a release blocker, not “not applicable”.
+**Lead only. Not delegable: handles live credentials and real family data.**
 
-### 00C — SDK and OAuth compatibility decision
-
-- Read: architecture.md auth sections, current official SDK/auth docs, Halaxy provider.
-- Own: `docs/decisions/0001-auth-and-sdk.md`, `docs/compatibility.md`; disposable spike
-  outside production source until selected.
-- Deliver: installable SDK release, verified provider/server imports, self-hosted
-  registration strategy, subject extraction, token metadata and actual HTTP handshake.
-- Accept: PKCE/resource/subject behavior tested with fake users; client round trips
-  pass or remain explicitly pending. Explain embedded-provider tradeoffs and fallback
-  self-hosted component if the SDK cannot satisfy requirements. No external IdP signup.
+- Read: [familywall.md](contracts/familywall.md) and [calendar.md](contracts/calendar.md)
+  open-question lists, and the P2a procedure in [the plan](implementation-plan.md).
+- Own: updates to both contract files and [compatibility.md](compatibility.md).
+  The probe script itself is throwaway and is never committed.
+- Prerequisite: a FamilyWall test family whose week has been populated **in the
+  UI first** with a normal event, an all-day event, a multi-day all-day event, a
+  recurring series with a cancelled or modified occurrence, and an event starting
+  before the query window and ending inside it. Without a known expected answer
+  the probe proves nothing.
+- Deliver: answers to the eight `pending-live` questions in each contract,
+  promoted with evidence level `live-verified` and the date; and the P4 branch
+  decision — consume server-expanded occurrences, or implement local expansion.
+- Accept: read-only, no write endpoint called; no credentials, cookies, real
+  names, event titles or IDs written to the repository or any diagnostic; every
+  answered question dated; unanswered questions still listed as `pending-live`
+  rather than quietly dropped.
 
 ## Foundation/client cards
 
@@ -120,11 +119,14 @@ The lead integrates completed changes and reruns affected checks before downstre
 ### 02B — Discovery and session lifecycle
 
 - Own: family discovery/context/session modules and focused tests.
-- Deliver: accessible-family/calendar mapping, verified family selection, per-user
-  pools/locks, bounded read reauth, eviction and credential-generation invalidation.
-- Accept: A/B cookie isolation, concurrent login collapse, active-family switch race,
-  password update racing old login, and read-only live discovery probe (or recorded
-  pending evidence). Foreign family IDs rejected before a target operation.
+- Deliver: family/calendar mapping from `accgetallfamily`, the **single-family
+  rule** (more than one accessible family is an explicit unsupported-configuration
+  error, never a silent pick), per-user pools/locks, bounded read reauth, eviction
+  and credential-generation invalidation.
+- Accept: A/B cookie isolation, concurrent login collapse, password update racing
+  an old login, and 02P discovery evidence (or recorded pending evidence). Foreign
+  family IDs rejected before a target operation. No family-switching code path is
+  written: there is no evidence any such request exists.
 
 ## Shopping/calendar cards
 
@@ -140,8 +142,10 @@ The lead integrates completed changes and reruns affected checks before downstre
 
 - Own: services/lists, receipt service interface implementation using test repository,
   tests; do not edit SQLite migrations in parallel with 05A.
-- Deliver: defaults/ambiguity/ownership, explicit checked state, operation receipt
-  state machine and acknowledgement/readback distinction.
+- Deliver: defaults/ambiguity/ownership, explicit checked state, the three-state
+  receipt machine (`confirmed` / `acknowledged` / `unknown`) and the
+  acknowledgement-versus-readback distinction. `taskmark` sends no list ID, so
+  item membership must be verified before the call — a security property.
 - Accept: same ID/payload returns prior result, mismatched payload rejects, lost
   response does not resend, pending receipt becomes unknown after crash, duplicate
   titles are not a global dedupe key. Verify list membership before item actions.
@@ -157,14 +161,21 @@ The lead integrates completed changes and reruns affected checks before downstre
 ### 04A — Calendar ranges and normalization
 
 - Own: familywall/calendar adapters, services/ranges, tests.
-- Deliver: verified calendar IDs, date/instant parsing, boundary adapter, occurrence
-  identity and overlap filtering. Preserve local all-day dates.
-- Accept: DST days/weeks, midnight overlap, malformed events, unknown recurrence and
-  truncation are represented correctly. Do not copy London/NONE mutation defaults.
+- **Blocked until 02P answers the all-day and boundary questions.**
+- Deliver: `calendar/{family_id}` usage confirmed by 02P, date/instant parsing,
+  the boundary adapter matched to observed inclusivity, occurrence identity and
+  overlap filtering. Preserve the raw start/end representation alongside the
+  parsed form until all-day encoding is settled.
+- Accept: DST days/weeks, midnight overlap, malformed events, unrecognised object
+  types preserved, and truncation represented as partial. Do not copy the
+  `Europe/London` / `recurrency=NONE` mutation defaults.
 
 ### 04B — Weekly overview and calendar tools
 
 - Own: services/calendar, tools/calendar, behavior tests.
+- **Blocked until 02P settles the recurrence branch.** If local expansion is
+  required, that becomes its own reviewed subtask with a maintained recurrence
+  library, and the limitation is stated until it lands.
 - Deliver: saved timezone/week-start handling, sorted/deduplicated occurrences,
   completeness/cursor warnings and calendar-only scope in descriptions.
 - Accept: known weekly calendar including exceptions matches FamilyWall; recurring

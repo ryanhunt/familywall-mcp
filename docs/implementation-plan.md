@@ -1,336 +1,353 @@
 # FamilyWall MCP implementation plan
 
-Status: ready for phased implementation; runtime not built. Updated 2026-09-13.
+Status: P0 discovery complete; P1 foundation implemented; runtime not built.
+Updated 2026-09-13.
 
 ## Outcome and agreed scope
 
 Build a Python MCP server that a few invited family members can connect to from
-ChatGPT and Claude. Each person signs in with their own self-hosted MCP login, which
-maps to encrypted FamilyWall credentials on the server. The initial release must
-support “add bread to the shopping list”, checking an item off, and “what have we got
-on this week at home?” using actual FamilyWall data.
+ChatGPT and Claude. Each person signs in with their own self-hosted MCP login,
+which maps to encrypted FamilyWall credentials on the server. V1 must support
+"add bread to the shopping list", checking an item off, and "what have we got on
+this week at home?" against real FamilyWall data, with account isolation,
+reconnects, persistence and operational recovery.
 
-This plan does not equate “fully working” with cloning every FamilyWall feature.
-V1 means those shopping/calendar workflows work for the invited users in both
-clients, with account isolation, reconnects, persistence and operational recovery.
-Calendar writes, messaging, attachments, meals and recipes are later extensions.
+V1 is not a clone of FamilyWall. Calendar writes, messaging, attachments, meals
+and recipes are later extensions.
 
-Read [research](research.md) for pinned source evidence, [architecture](architecture.md)
-for interfaces and behavior, and [task cards](tasks.md) to delegate one change at a
-time. The plan proposes future code, commands and test cases; none are currently runnable.
+Read [research](research.md) for the evidence base, [contracts](contracts/familywall.md)
+and [calendar contracts](contracts/calendar.md) for the wire surface,
+[ADR 0001](decisions/0001-auth-and-sdk.md) for the SDK and OAuth decision,
+[architecture](architecture.md) for interfaces, [compatibility](compatibility.md)
+for what is actually verified, and [task cards](tasks.md) to delegate one change
+at a time. [PROGRESS](PROGRESS.md) tracks resumable state.
 
-## Decisions already made
+## What P0 settled
 
-- Python, directly porting the necessary TypeScript wire contracts.
-- A few invited users, each with a separate login and FamilyWall link.
-- Entirely self-hosted login and credential storage, following Halaxy's operational model.
-- Official MCP SDK, stdio for developer/local checks, authenticated Streamable HTTP
-  over HTTPS for the shared service.
-- Small modular package; SQLite; non-root Docker + Caddy; no public signup.
-- No credentials in GitHub, commits, logs, fixtures or model-visible tool payloads.
-- Cheap agents may implement bounded tickets. Lead agent reviews shared contracts,
-  security boundaries and final integration.
+P0 ran as source reconnaissance plus an executed SDK spike. Four findings change
+the shape of the work and are now binding:
+
+1. **Family scope is a property of the session, not a request parameter.** No
+   list or calendar call carries a family ID. There is no evidenced way to select
+   a family. V1 therefore serves exactly one family per account, names that family
+   in its output, and **refuses** — rather than guesses — when discovery returns
+   more than one. Multi-family support is out of scope, not merely unimplemented.
+2. **The MCP SDK supplies the OAuth endpoint surface.** `mcp` 2.2.0 mounts
+   `/authorize`, `/token`, `/register`, `/revoke` and both metadata documents from
+   an `OAuthAuthorizationServerProvider` implementation. P5 is storage and policy
+   work against a ten-method protocol, not protocol implementation. No Authlib.
+3. **The authenticated subject is available per request** via
+   `get_access_token().subject`, which is the key into encrypted credentials.
+   Multi-user isolation has a concrete mechanism.
+4. **Calendar reads are far less proven than lists.** Six event fields are
+   evidenced. All-day encoding, recurrence, occurrence identity and cancellation
+   have none. P4 cannot be planned as a port.
+
+## The reordering this implies
+
+The original plan front-loaded offline work. P0 shows that a large share of the
+remaining risk collapses to questions only a live account can answer, and they
+are concentrated in **one read-only probe**:
+
+- is `JSESSIONID` alone enough to authenticate?
+- what does the session's family resolve to?
+- is `calendar/{family_id}` accepted?
+- does an interval query return expanded recurring occurrences?
+- how is an all-day event encoded?
+- are overlapping events returned?
+
+Answering these is perhaps an hour of work against a test family, and every one
+of them can invalidate weeks of downstream implementation if guessed wrong. The
+probe is therefore promoted to **P2a, the next action after this plan**, ahead of
+all feature implementation. It reads only; it writes nothing.
+
+If no account is available, P3 (lists) may proceed offline because its contracts
+are `source-tested`. **P4 (calendar) must not start**, because its two central
+questions are unanswered and the two possible answers have opposite designs.
+Building the wrong one is the most expensive mistake available here.
 
 ## Phases and dependencies
 
 | Phase | Deliverable | Depends on | Exit evidence |
 | --- | --- | --- | --- |
-| P0 | Contract and compatibility reconnaissance | This plan | Written evidence resolves the risky protocol/auth choices |
-| P1 | Python package and offline harness | P0 SDK/contract decisions | Reproducible install and meaningful checks on a clean checkout |
-| P2 | FamilyWall session and account context | P1 | Synthetic auth/error cases and opt-in read-only live probe |
-| P3 | Shopping-list services and local MCP tools | P2 | Exact request tests, readback, ambiguity and unknown-write handling |
-| P4 | Reliable week/calendar services and tools | P2 | DST/recurrence/overlap tests and calendar comparison |
-| P5 | Per-user storage, self-hosted login and OAuth | P1, P0 auth decision | Two-user HTTP isolation, login/refresh/revoke/restart tests |
-| P6 | Integrated hosted service and operations | P3, P4, P5 | HTTPS deployment, recovery drill, both clients connected |
-| P7 | End-to-end acceptance and v1 release preparation | P6 | Full acceptance matrix passes, limitations documented |
-| P8 | Optional broader FamilyWall features | P7 + per-feature discovery | Independent scoped acceptance for each new feature |
+| P0 | Contract and SDK reconnaissance | — | **done**: contracts, ADR 0001, compatibility record |
+| P1 | Python package and offline harness | P0 | **done**: PR #1, `scripts/check` green on a clean checkout |
+| P2a | Read-only live probe | P1, test account | The eight open questions answered and recorded |
+| P2b | FamilyWall client, session and family context | P2a (or offline with gaps recorded) | Synthetic auth/error cases; discovery validated |
+| P3 | Shopping-list services and tools | P2b | Exact request tests, readback, ambiguity, unknown-write handling |
+| P4 | Calendar services and tools | P2b + P2a calendar answers | DST/recurrence/overlap tests and a calendar comparison |
+| P5 | Per-user storage, login and OAuth | P1, ADR 0001 | Two-user HTTP isolation; login/refresh/revoke/restart |
+| P6 | Hosted service and operations | P3, P4, P5 | HTTPS deployment, recovery drill, both clients connected |
+| P7 | Acceptance and v1 release preparation | P6 | Acceptance matrix passes; limitations documented |
+| P8 | Optional broader features | P7 + per-feature discovery | Independent scoped acceptance per feature |
 
-P3 and P4 can run independently after P2 freezes domain contracts. P5 storage work
-can proceed after P1 while P2–P4 use a synthetic/local principal. Integration remains
-serial. An incomplete OAuth phase must never expose a real unauthenticated service
-to the internet. P0 tests may use a temporary endpoint with fake data only.
+P3, P4 and P5 run in parallel after P2b freezes domain contracts; P5's storage
+work can start immediately after P1 against a synthetic principal. Integration is
+serial. An incomplete OAuth phase must never expose an unauthenticated service to
+the internet.
 
-## P0 — Prove contracts before building on them
+## P2a — Read-only live probe
 
-**Objective:** replace assumptions most likely to cause a rewrite with evidence.
-Keep this phase bounded to discovery and a disposable compatibility spike.
+**Objective:** convert `pending-live` into fact. Nothing else in this phase.
 
-Work:
+Rules: read-only; no write endpoint is called; credentials are supplied outside
+chat and Git; captured payloads are reduced to shapes and field names, with
+family names, event titles, member names and IDs redacted before anything is
+written to the repository.
 
-1. Turn the research matrix into `docs/contracts/familywall.md`, recording endpoint,
-   method, form fields, response variants, source SHA/line and evidence level
-   (`source-only`, `offline-tested`, `live-verified`). Use the pinned TypeScript tests
-   as examples; never treat permissive parser branches as observed live payloads.
-2. Verify multi-family discovery, family-to-calendar mapping and active-family/list
-   scoping. Determine whether family selection mutates session state. If so, lock
-   select+operation together, or use isolated sessions per verified family context.
-   Do not add a guessed `familyId` field to list calls. If unresolved, explicitly limit
-   the account to its verified active family and block unsupported switching.
-3. Determine interval boundary/overlap semantics, all-day encoding, recurring instance
-   IDs, exclusions/cancellations and which calendars appear. Use a test family with
-   known examples. No fabricated recurrence expansion. A week cannot be accepted
-   as complete while known recurring events are silently missing.
-4. Install an exact stable Python MCP SDK in a disposable environment; test the chosen
-   v2 server/provider interfaces, request subject propagation, metadata, PKCE and
-   resource validation. Record the release and minimum compatible protocol versions.
-5. Prove a self-hosted OAuth round trip with a synthetic `whoami` tool using the chosen
-   library/provider. Try real ChatGPT/Claude connections when access and a temporary
-   HTTPS endpoint are available; otherwise mark those checks pending for P6.
-6. Resolve source attribution before porting code. Record the original MIT notices
-   for the Tomsoz/CodingButter lineage, not just the package's license label.
+Procedure — one throwaway script, not production code:
 
-Artifacts: contract matrix, `docs/decisions/0001-auth-and-sdk.md`,
-`docs/compatibility.md`, sanitized test-case descriptions. Discard experimental
-runtime code unless deliberately adopted in P1 with tests.
+1. `log2in`; record what cookies come back and whether `JSESSIONID` alone
+   authenticates a subsequent call. Determine whether `webset`/`webget` are
+   required for list and calendar calls or only for login.
+2. Call `accgetallfamily` with a reduced batch (`a00` + `a01` only). Record how
+   many families the account has and the shape of the family payload. Confirm
+   whether the constant `deviceId` fields are needed.
+3. `taskgettasklists`; record how many lists, their types, and whether the
+   response is a bare array or wrapped.
+4. `tasklist` on one list; record item field names actually present.
+5. `evtlistinterval` with `calendar/{family_id}` for a week known to contain: a
+   normal event, an all-day event, a multi-day all-day event, a recurring series
+   with at least one cancelled or modified occurrence, and an event that starts
+   before the window and ends inside it. **This week must be constructed in the
+   FamilyWall UI first** — the probe's value depends entirely on knowing the
+   expected answer before reading it.
+6. Record whether recurring occurrences arrive expanded or as a master, how an
+   occurrence is identified, how all-day is encoded, and whether the overlapping
+   event appeared.
+7. Deliberately invalidate the session (or wait it out) and record how expiry
+   presents: HTTP 401, an HTML login page, or an `a00.ex` envelope.
 
-**Gate:** lead reviews the selected OAuth component and exact family-context behavior.
-Lack of a live test account does not stop offline work; dependent claims remain
-unverified. A protocol gap becomes a small discovery ticket with a concrete question,
-not an invented endpoint or a silent fallback. Provider incompatibility requires an
-ADR revision before P5; owner requested self-hosting, so an external IdP is not the fallback.
+**Gate:** update [contracts](contracts/familywall.md),
+[calendar contracts](contracts/calendar.md) and [compatibility](compatibility.md),
+promoting each answered item from `pending-live` to `live-verified` with the date.
+Then decide the P4 branch: consume expanded occurrences, or implement expansion.
+The probe script is discarded; only its findings are kept.
 
-## P1 — Reproducible Python foundation
+## P2b — Client, sessions and family context
 
-**Objective:** every later agent has one package layout, test harness and check command.
+**Objective:** a Python client authenticates and discovers its own data.
 
-Work:
+- Port form encoding and the `a00.r.r` / `a00.ex` envelope with async HTTPX,
+  cookie jar and the `tokencsrf` header. Do **not** port the static analytics
+  cookie values or the constant browser `deviceId` unless P2a proved them
+  necessary; if necessary, generate a per-installation value.
+- Login failure raises a typed error. There is no upstream logout, so a session
+  is valid until it demonstrably fails.
+- Separate six failure modes: non-2xx HTTP, HTML body, invalid JSON, missing
+  `a00`, `a00.ex`, and unexpected `a00.r.r` shape. Emit safe domain errors with
+  endpoint labels, never raw bodies.
+- Implement discovery, and enforce the single-family rule: more than one family
+  is an explicit unsupported-configuration error, never a silent pick.
+- Keep FamilyWall account ID, family ID, calendar ID and MCP user ID distinct in
+  the type system, not merely by convention.
+- Per-user client pool, one login lock per credential generation, bounded idle
+  eviction, bounded read-only reauth, no write retry, no global cookie jar.
 
-- Add `pyproject.toml`, a locked dependency set, src-layout package, test extras and
-  console entry points. Establish config, typed errors, `Principal`, domain models,
-  transport injection and storage interfaces from the architecture.
-- Define explicit `stdio` and hosted configurations. Hosted startup must reject
-  missing key/auth/public URL settings. Environment values are never printed.
-  Provide `.env.example` with dummy placeholders and a deterministic config path.
-- Add pytest fixtures for JSON envelopes, fake cookies, a fixed clock, request capture
-  and a fake upstream that rejects unexpected calls. Block external network in the
-  default suite. Include a substantive config/error test rather than placeholder tests.
-- Provide a single local check entry point covering locked installation, lint/format
-  checks, typing, offline tests, build and secret detection, and inspect tracked build
-  inputs. This project deliberately has no CI workflow; the checks are run locally and
-  their results recorded in the pull request. Keep a future `.dockerignore` in scope
-  before any container build.
-- Update AGENTS/CONTRIBUTING with real commands only when they exist; preserve the
-  shared Claude import. Keep inherited license notices with ported material.
+Tests: Unicode form payload, multiple `Set-Cookie` headers, missing cookie,
+malformed success and error envelopes, HTML login page on HTTP 200, 401/403/429,
+transport timeout, one read reauth, bounded retries, concurrent users A/B,
+same-user parallel requests, concurrent login collapse, and password change
+racing an old session.
 
-Proposed command contract to implement: `uv sync --frozen --group dev`,
-`uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy src`,
-`uv run pytest -m 'not live'`, and `uv build`. A small `scripts/check` should run the
-project's agreed checks; these are unavailable until P1 defines them.
-
-**Gate:** clean install/build and actual baseline tests pass with no FamilyWall account.
-Both AI tools can find the same operating instructions. No real API tools advertised yet.
-
-## P2 — FamilyWall client, sessions and family context
-
-**Objective:** a Python client can authenticate and discover its own accessible data.
-
-Work:
-
-- Port exact form encoding and envelopes with async HTTP, cookie/CSRF handling and
-  login → webset/webget. Use a cookie jar and necessary verified headers; remove
-  static analytics cookies and hard-coded browser device identifiers unless required
-  and explained by evidence. Never forward FamilyWall credentials to another origin.
-- Unify error handling across new and legacy endpoints: invalid credentials,
-  missing session, HTML response, 401/403, `a00.ex`, invalid JSON, rate limit, timeout
-  and schema drift. Emit safe domain errors with endpoint labels, not raw bodies.
-- Port discovery and implement P0's verified family selection strategy. Distinguish
-  FamilyWall account ID, family ID, calendar ID and MCP user ID.
-- Implement bounded client lifetime, concurrent-login suppression, read-only retry
-  policy and explicit credential-generation invalidation. Login failure must raise.
-- Implement local single-user injection for stdio and a test principal provider;
-  no global account fallback in hosted mode.
-
-Tests: Unicode form payload, multiple Set-Cookie headers, missing cookie, malformed
-success/error envelope, logout/password change, one read reauth, bounded retries,
-concurrent users A/B, same-user parallel requests and correct active-family context.
-
-**Gate:** a read-only opt-in test-family probe validates login and family/calendar
-discovery. If unavailable, record it as pending and continue offline P3/P4; it remains
-a release blocker. Do not ship tools for unresolved family contexts.
+**Gate:** discovery validated against the P2a evidence, or the gap recorded as a
+release blocker. No tool ships for an unresolved family context.
 
 ## P3 — Shopping workflow
 
-**Objective:** “add bread to the shopping list” resolves the right list, writes once,
-and reports what actually happened.
+**Objective:** "add bread to the shopping list" resolves the right list, writes
+once, and reports what actually happened.
 
-Work:
+- Port `taskgettasklists`, `tasklist`, `taskcreate`, `taskmark` with every
+  documented alias. Preserve unknown list types. Quantity is passed through
+  verbatim as a string — no unit parsing, normalisation or conversion.
+- List selection: a validated saved default, or a single eligible list, or an
+  ambiguity response offering choices. Never an arbitrary first list. A deleted
+  or inaccessible default does not silently redirect the write.
+- `taskmark` sends no list ID, so item ownership **must** be verified against an
+  accessible list before the call. This is a security property, not a nicety.
+- Represent the three write outcomes distinctly: `confirmed` (acknowledged and
+  read back), `acknowledged` (upstream success, readback did not confirm),
+  `unknown` (lost, timed out, unparseable). `unknown` is never auto-retried —
+  `taskcreate` is not idempotent.
+- Operation receipts behind a storage interface (SQLite lands in P5): same
+  ID and payload returns the prior result, a mismatched payload rejects, and
+  unknown stays unknown across restart. Receipts are scoped to user and list.
+- Tools: `list_lists`, `get_list`, `add_list_item`, `set_list_item_checked`,
+  plus the connection/family tools clients need. Thin handlers over services.
 
-- Port summary/detail/add/mark request and parser contracts. Support optional quantity
-  only in the upstream's verified string/number form; do not invent unit conversion.
-- Build list selection using validated account defaults, a single eligible list,
-  or an ambiguity response with choices. A deleted/default-inaccessible list does
-  not silently switch the destination. Validate IDs against the accessible collection.
-- Add `list_lists`, `get_list`, `add_list_item`, `set_list_item_checked` thin handlers
-  using shared service results. Include the connection/family tools needed by clients.
-- Introduce `operation_id` receipt handling via a storage interface (SQLite persistence
-  lands in P5). Same ID/payload returns the known result; mismatch rejects. Unknown
-  results stay unknown after restart. Scope receipts to user and target list/family.
-- Read back the created/marked item when possible; distinguish upstream acknowledgement
-  from confirmed state. No blind write retries, bulk actions or deletion in this phase.
+Tests: several shopping lists, duplicate list names, invalid/default/foreign
+IDs, already-completed items, Unicode titles, omitted quantity, explicit
+`false`, ID-only acknowledgements, malformed responses, lost response, crash
+after send, receipt replay and mismatch, and scope enforcement. Adding bread
+twice on purpose must work — no global de-duplication by item text.
 
-Tests: multiple shopping lists, duplicate names, invalid/default/foreign IDs, completed
-items, Unicode title, quantity omission, explicit false, ID-only acknowledgements,
-malformed response, lost response, crash after send, receipt replay/mismatch and
-scope enforcement. Demonstrate that adding bread twice intentionally is possible;
-do not globally deduplicate by item text.
-
-**Gate:** offline MCP tool tests and a controlled live add/check/uncheck in a test list
-match the FamilyWall UI. Cleanup only test items created for the run using a known
-supported route/UI; item-delete endpoint discovery is not required for cleanup.
+**Gate:** offline tool tests pass, and a controlled live add/check/uncheck in a
+test list matches the FamilyWall UI. Test items are cleaned up through the UI;
+no item-delete endpoint exists.
 
 ## P4 — Calendar and weekly overview
 
-**Objective:** a household week shows the correct events and honestly signals gaps.
+**Do not start before P2a answers the recurrence and all-day questions.**
 
-Work:
+**Objective:** a household week shows the correct events and signals gaps
+honestly.
 
-- Port interval requests and normalize event/occurrence IDs, title, start/end,
-  all-day status, timezone, calendar/family context and permitted participant names.
-  Fetch the user's relevant calendars using P0's mapping; do not assume family ID
-  and calendar ID are interchangeable or merge unrelated families.
-- Accept RFC3339 instants or documented local dates; reject ambiguous naive datetimes.
-  Resolve weeks using local calendar arithmetic (`zoneinfo`), never seven fixed
-  24-hour additions across DST. Configure timezone/default week start per user.
-- Implement and test the boundary adapter for the observed upstream inclusivity.
-  Include events overlapping the query window, not only those starting inside it.
-- Use server-provided recurring instances when available. If expansion is required,
-  give it a separately reviewed subtask with proven recurrence/exception fields and
-  a maintained recurrence library. Avoid treating a series master as one occurrence.
-- Return stable ordering, occurrence-aware deduplication and range/completeness
-  metadata. Bound fetch windows (proposed 31 days per call) and output size; if a cap
-  is reached, provide a supported follow-up mechanism or explicit partial status.
+- Normalise the six proven fields, and preserve the raw start/end representation
+  alongside the parsed form until all-day encoding is settled.
+- Accept RFC 3339 instants or local dates in the user's timezone; reject naive
+  datetimes. Resolve weeks with `zoneinfo` calendar arithmetic, never seven
+  fixed 24-hour additions. Timezone and week start are per-user preferences.
+- Implement the boundary adapter against P2a's observed inclusivity, and include
+  events overlapping the window, not only those starting inside it.
+- Recurrence takes whichever branch P2a established. If local expansion is
+  required, it is a separate reviewed sub-task with a maintained recurrence
+  library, and the beta limitation is stated until it lands. A series master is
+  never presented as a single occurrence.
+- Stable ordering, occurrence-aware de-duplication, and explicit range and
+  completeness metadata. Bound fetch windows (proposed 31 days per call) and
+  output size; a reached cap reports partial status rather than a clean-looking
+  week.
+- Preserve unrecognised objects — `evtsync` flags show tasks, meals and external
+  items can appear in calendar data.
 
-Tests: Sydney spring/fall DST, a second timezone, Sunday/Monday boundaries, events
-crossing midnight/week boundaries, all-day multi-day events, explicit offsets,
-cancelled/changed recurring instances, overlapping calendars, empty/error distinction
-and output truncation. Verify the known test week against FamilyWall.
+Tests: the twelve cases in [calendar contracts](contracts/calendar.md).
 
-**Gate:** both calendar tools produce matching complete results for the supported
-calendar semantics. If recurrence remains unresolved, label the beta limitation and
-keep full v1 week acceptance open; do not quietly mark P7 complete.
+**Gate:** the known test week matches FamilyWall. If recurrence is unresolved,
+the limitation is labelled and full v1 week acceptance stays open — P7 is not
+quietly marked complete.
 
 ## P5 — Invited users, encrypted links and self-hosted OAuth
 
 **Objective:** each client token authorizes exactly one invited user's account.
-Split this phase into the separate storage, account-page and OAuth tickets in tasks.md.
 
-Work:
+- SQLite migrations and repositories for the records in
+  [architecture](architecture.md#identity-and-storage-contract): users,
+  invitations, preferences, credentials, web and OAuth state, rotation families
+  and operation receipts. Atomic consumption, unique constraints, foreign keys,
+  WAL. Test upgrade, restart and concurrent access.
+- AES-GCM envelope encryption with key versions and AEAD data binding ciphertext
+  to user ID and field; Argon2id for MCP login passwords. Plaintext FamilyWall
+  credentials exist only for the duration of an API call. Opaque token values are
+  hashed at rest. A missing key fails closed and is never regenerated.
+- Implement the SDK's ten provider methods over that storage: `get_client`,
+  `register_client`, `authorize`, `load_authorization_code`,
+  `exchange_authorization_code`, `load_refresh_token`, `exchange_refresh_token`,
+  `load_access_token`, `revoke_token`, `exchange_identity_assertion`. Enable
+  dynamic client registration and revocation. `subject` is a random stable user
+  ID; `client_id` is never treated as identity.
+- Login, consent, invite acceptance, account-link and defaults pages are ours.
+  FamilyWall credentials are validated before replacing a working link. The
+  Halaxy reference's regression history — consent phishing, reflected XSS,
+  expiring login state, login throttling — is the test list for these pages.
+- Operator CLI: create invites, disable users, revoke sessions, reset access,
+  rotate keys. Non-echo password input, never shell arguments. No SMTP; the
+  operator shares invite URLs privately.
+- User status is checked per request, so local disable or revoke takes effect on
+  the next call even with an unexpired token.
 
-- Add SQLite migrations and repositories for users, invitations/recovery, preferences,
-  credentials, web/OAuth state, rotation families and operation receipts. Use atomic
-  consumption and unique constraints; test upgrade/restart and concurrent access.
-- Implement AES-GCM envelope/key versions and Argon2id password hashing through
-  maintained libraries. Store a random stable user ID as OAuth subject; hash opaque
-  token values at rest. Keep plaintext credentials only for the short API call lifecycle.
-- Add operator CLI workflows to create invites, disable users, revoke sessions, reset
-  access and rotate keys. Passwords use non-echo input, never shell arguments. No
-  outbound email/SMTP service required; the operator shares invite URLs privately.
-- Add invite acceptance, login, consent, account-link and defaults pages. FamilyWall
-  credentials are validated before replacing a working link. A concurrent old login
-  cannot reinstall its old session after a credential update.
-- Implement P0's OAuth provider contract: client registration strategy, metadata,
-  code + PKCE, scopes/resource binding, per-request token verification, refresh,
-  revocation, expiry, login rate limits, browser session/CSRF and secure redirects.
-- Wire the verified subject to each tool's service context. Local disable/revoke
-  takes effect on the next request, even when the token is otherwise unexpired.
+Tests, over real HTTP rather than an in-memory client that bypasses middleware:
+user A's token with user B's IDs, transport session reuse with another token,
+parallel different-family calls, forged subject or client ID, a read-scoped token
+on a write tool, authorization-code and refresh replay, redirect substitution,
+XSS and CSRF, invite reuse, wrong AEAD subject, missing or wrong key, link
+replacement, and pending mutations surviving restart.
 
-Tests: user A token + user B IDs, transport session reuse with another token, parallel
-different-family calls, forged username/client ID, read token on write tool, OAuth
-code/refresh replay, redirect substitution, XSS/CSRF, invite reuse, wrong AEAD subject,
-missing/wrong key, link replacement, and persisted pending mutations after restart.
-Use actual HTTP requests for auth tests: in-memory MCP tests can bypass middleware.
-
-**Gate:** lead reviews auth/storage changes and all negative isolation cases pass.
-MCP credentials, FamilyWall credentials and OAuth client credentials remain distinct.
-No arbitrary user-switching parameter exists in any tool.
+**Gate:** lead review of auth and storage; all negative isolation cases pass. MCP
+credentials, FamilyWall credentials and OAuth client credentials stay distinct.
+No tool accepts a user-switching parameter.
 
 ## P6 — Hosted integration and operational recovery
 
-**Objective:** a reproducible, persistent HTTPS service that survives routine updates.
+- Wire tools, account pages and OAuth into the ASGI lifespan; manage client pools
+  and DB connections. One worker until shared locking is designed.
+- Dockerfile, `.dockerignore`, local and production Compose, Caddy example.
+  Non-root; only the proxy's 80/443 published in production; developer HTTP bound
+  to loopback. Mount `/data`, the encryption key and Caddy state correctly; keep
+  secrets out of the build context and image layers. Build amd64 and arm64.
+- Shallow `/health` that neither logs into FamilyWall nor reveals users or
+  config. Resource, timeout and retention limits; Origin and Host validation;
+  proxy buffering and timeouts appropriate to Streamable HTTP.
+- Runbooks: setup, invite/link/reconnect, update/rollback, backup/restore,
+  disable/revoke, key rotation, upstream drift. Back up SQLite with its backup
+  API; store the key separately; restore into a disposable instance.
+- Connect real ChatGPT and Claude accounts over HTTPS. Record callback URIs, the
+  negotiated `MCP-Protocol-Version`, registration mode (DCR, or Claude's CIMD if
+  DCR proves awkward), tool metadata, login, expiry, refresh and reconnect.
+  Confirm two invited users work independently and concurrently.
 
-Work:
-
-- Integrate tools/account pages/OAuth in the ASGI lifespan; manage clients and DB
-  connections. Enforce one worker until shared locking/session design is expanded.
-- Add Dockerfile, `.dockerignore`, local/production Compose files and Caddy example.
-  Run non-root; publish only proxy 80/443 in production. Bind developer HTTP to loopback.
-  Mount `/data`, encryption keys and Caddy state correctly; keep secrets outside build
-  context and image layers. Test amd64 and arm64; 32-bit Pi support is a separate choice.
-- Add shallow `/health` and local operational readiness checks. Health probes must not
-  log into FamilyWall or reveal users/config. Set resource/timeouts/retention limits,
-  Origin/Host validation and proxy buffering/timeouts for the selected MCP transport.
-- Write setup, invite/link/reconnect, update/rollback, backup/restore, disable/revoke,
-  key-rotation and upstream-drift runbooks. Back up DB consistently with SQLite's
-  backup mechanism; store the key separately. Restore into a disposable instance.
-- Connect real ChatGPT and Claude accounts over HTTPS. Record callback URIs and
-  negotiated transport/protocol, tool metadata, login, expiry/refresh and reconnect.
-  Confirm both invited users work independently, including concurrent requests.
-
-**Gate:** restart/rebuild retains links and OAuth refresh state; restoring DB plus
-key recovers service; revocation and unknown mutation state survive restart. A lost
-key fails clearly. Client checks are recorded as pass/fail/pending, with no secrets.
-No provider/hosting purchase or production deployment is performed by this plan.
+**Gate:** restart and rebuild retain links and refresh state; restoring DB plus
+key recovers service; revocation and unknown mutation state survive restart; a
+lost key fails clearly. Client checks recorded as pass, fail or pending, with no
+secrets. This plan performs no hosting purchase or production deployment.
 
 ## P7 — Acceptance and release preparation
 
-Use this matrix in both ChatGPT and Claude. For tests requiring multiple users,
-use at least two distinct test accounts; use a second test family to exercise
-negative boundaries where the accounts would otherwise share identical access.
+Run in both ChatGPT and Claude, with at least two distinct test accounts and a
+second test family for negative boundaries.
 
 | Scenario | Required observed result |
 | --- | --- |
-| Invite and connect | User sets own MCP login, links own FamilyWall account, grants OAuth; no password in chat |
-| Add bread | Correct family/list, one new item, verified ID/state in FamilyWall |
-| Several shopping lists | Clarification or saved default; never arbitrary first-list selection |
-| Check and uncheck | Correct existing item, requested explicit state, repeat-safe behavior |
-| This week at home | Correct resolved local interval; matches normal/all-day/recurring/cancelled test events |
-| Another user's IDs | Safe denial before any foreign data/write reaches the upstream operation |
-| Write with read scope | Rejected; annotation alone cannot bypass policy |
-| Expired FamilyWall session | Bounded read recovery or clear reconnect guidance, no false empty response |
-| Lost mutation response | Unknown outcome/reconciliation; no automatic duplicate addition |
-| Upstream error/rate limit | Safe actionable error; no hidden retries beyond policy |
-| Restart/update | Account links, grants, defaults and receipts persist |
-| Disable/revoke | Old credentials/tokens stop authorizing next request |
-| Backup/key rotation | Restore succeeds; wrong/missing key fails clearly; old state remains recoverable during rotation |
-| Sensitive output review | Logs, image layers, Git diff, fixtures and diagnostics contain no live secrets/family data |
+| Invite and connect | User sets their own MCP login, links their own FamilyWall account, grants OAuth; no password in chat |
+| Add bread | Correct family and list, one new item, verified ID and state in FamilyWall |
+| Several shopping lists | Clarification or a saved default; never an arbitrary first list |
+| Check and uncheck | Correct item, requested explicit state, repeat-safe |
+| Multiple families on one account | Explicit unsupported-configuration error naming the limitation |
+| This week at home | Correct local interval; matches normal, all-day, recurring and cancelled test events |
+| Another user's IDs | Safe denial before any foreign data or write reaches upstream |
+| Write with read scope | Rejected; an annotation alone cannot bypass policy |
+| Expired FamilyWall session | Bounded read recovery or clear reconnect guidance; never a false empty result |
+| Lost mutation response | Unknown outcome reported; no automatic duplicate |
+| Upstream error or rate limit | Safe actionable error; no hidden retries |
+| Restart and update | Links, grants, defaults and receipts persist |
+| Disable and revoke | Old credentials and tokens stop authorizing the next request |
+| Backup and key rotation | Restore succeeds; wrong or missing key fails clearly; old state recoverable during rotation |
+| Sensitive output review | Logs, image layers, Git diff, fixtures and diagnostics contain no live secrets or family data |
 
-Release deliverables: concise user README with tested connection instructions,
-operator runbook, supported-tool/scope table, known limitations and compatibility
-record. Run the full local check suite and the controlled acceptance suite once;
-repeat only checks affected by a fix. V1 is ready only when all required rows pass.
-Commit/push/release publication follow the user's delivery request.
+Deliverables: a user README with tested connection instructions, an operator
+runbook, a supported tool and scope table, known limitations, and the
+compatibility record. Run the full local check suite and the acceptance suite
+once; repeat only what a fix affects. V1 is ready only when every required row
+passes. Commit, push and release follow the user's explicit delivery request.
 
 ## P8 — Independent extensions
 
-After v1, prioritize according to actual household use:
+Prioritised by actual household use after v1:
 
-1. Create lists and single non-recurring calendar events, with explicit timezone,
-   duplicate protection and post-write verification.
-2. Calendar update/delete only after recurrence occurrence/series semantics are proven.
-   Do not port the current TypeScript `option=All` deletion as a default.
-3. Fresh thread reads and bounded message history; verify ordering/read-state effects
-   before promising passive reads. Text sending is its own explicitly enabled scope.
-4. Attachment metadata/download if clients need it; apply size limits, URL validation,
-   redirect restrictions and credential isolation. Do not return tokenized URLs by default.
-5. Meals/recipes/ingredients and list edit/delete only after endpoint discovery yields
-   complete request/response/failure contracts. Endpoint names alone are insufficient.
+1. Create lists (`taskcreatelist`, types `SHOPPING`/`TODO`/`OTHER`) and single
+   non-recurring calendar events, with explicit timezone — never the reference
+   client's hard-coded `Europe/London` — duplicate protection and post-write
+   verification.
+2. Calendar update and delete only after occurrence-versus-series semantics are
+   proven. The reference client's `evtdelete` with `option=All` is not a default;
+   deleting a series when one occurrence was meant is unacceptable.
+3. Item edit and delete: no endpoint evidence exists. Discovery first.
+4. Message threads and bounded history; verify ordering and read-state effects
+   before promising passive reads. Sending is its own explicitly enabled scope.
+5. Attachment metadata and download, with size limits, URL validation, redirect
+   restrictions and credential isolation. No tokenized URLs returned by default.
+6. Meals, recipes, categories and ingredient transfer — endpoint names only, no
+   contracts. Discovery yields complete request, response and failure contracts
+   before any implementation.
+7. Multi-family support, which requires evidence that family selection is even
+   possible. `evtsync`'s `withAllFamilies` flag is the only lead.
 
 Each extension gets a contract, narrow tool schemas, offline tests, scoped live
-acceptance and updated client compatibility evidence. No general-purpose raw API tool.
+acceptance and an updated compatibility record. No general-purpose raw API tool.
 
-## Cost-conscious execution
+## Execution economics
 
-Budget in small deliverables rather than uncertain token/hour estimates. Most task
-cards target one focused PR-sized change. Use Luna for evidence collection, parsers,
-fixtures, handlers, documentation and bounded implementation. Use the lead for
-P0 decisions, auth/tenant isolation, recurrence policy and milestone review.
+Budget in small deliverables, not token estimates. Most task cards are one
+PR-sized change. Use cheap agents for evidence collection, parsers, fixtures,
+handlers, documentation and bounded implementation against a defined contract.
+Keep with the lead: the P2a probe interpretation, auth and tenant isolation, the
+recurrence branch decision, and milestone review.
 
-Give an agent only AGENTS.md, its task card, the relevant contract/model files and
-the pinned source snippets it needs. If a task requires an unproven protocol detail,
-stop that dependent part, record a discovery ticket, and complete independent work.
-No agent should reread both complete repositories on every ticket.
+Give an agent only AGENTS.md, its task card, the relevant contract and model
+files, and the source snippets it needs. If a task depends on an unproven
+protocol detail, stop that part, record a discovery ticket with a concrete
+question, and finish the independent work. No agent rereads both repositories on
+every ticket.
 
-The first tangible milestone is local shopping plus calendar tools after P3/P4.
-The requested hosted product is complete only after P7. Prioritize known risks
-(family selection, recurrence, OAuth interoperability) early so inexpensive feature
-work does not build on a mistaken contract.
+The first tangible milestone is local shopping plus calendar tools after P3 and
+P4. The requested hosted product is complete only after P7.
