@@ -1,9 +1,8 @@
 # Contributing
 
-This repository is at its documentation-only foundation stage. Contributions
-should describe the intended behaviour and acceptance evidence clearly while
-the Python async client and MCP server are being built. Do not imply that a
-planned tool, login flow, or command is already available.
+The repository now contains the Phase 1 package and offline harness. The MCP
+server, FamilyWall client/tools, and login flow remain unimplemented. Do not
+imply that those planned capabilities are available.
 
 Read [`AGENTS.md`](./AGENTS.md) before working, then use the bounded workflow
 in [`docs/agent-workflow.md`](./docs/agent-workflow.md). Start with a focused
@@ -12,12 +11,11 @@ handoff template. Keep changes on a fresh `codex/<short-slug>` or
 `claude/<short-slug>` branch. Commits, pushes, pull requests, and merges are
 delivery actions that require the user's request.
 
-There are currently no package metadata, dependency lockfiles, runtime entry
-point, test suite, or project-defined check command. Runtime validation is
-therefore unavailable until the foundation implementation adds those pieces;
-record that limitation rather than substituting an unverified command. Plans
-may still propose the checks that the foundation should add, clearly marked as
-proposed or unavailable.
+Install from the committed lockfile with `uv sync --frozen --group dev`, then run
+`scripts/check`. Individual checks are `uv run ruff check .`, `uv run ruff format
+--check .`, `uv run mypy src`, `uv run pytest -m 'not live'`, and `uv build`.
+The suite blocks external network access by default; live tests are not included
+in ordinary CI and require explicit authorization.
 
 Keep credentials and private family data out of the repository and its
 diagnostics. Use synthetic fixtures and dummy values in examples. Existing
