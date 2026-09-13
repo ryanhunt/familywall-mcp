@@ -59,7 +59,7 @@ replaced, not deleted wholesale — assert the new exact field sets.
 `WriteOutcome` gains a fourth member:
 
 ```python
-MISFILED = "misfiled"   # created, but it is in the wrong list
+MISFILED = "misfiled"  # created, but it is in the wrong list
 ```
 
 New `add_item` flow:

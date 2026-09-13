@@ -234,14 +234,105 @@ class TestListServiceMutation:
             system_id=None,
         )
 
-    async def test_add_item_confirmed(
+    async def test_add_item_confirmed_with_move(
         self, service: ListService, transport: FakeTransport, principal: Principal
     ) -> None:
-        """Criterion 8: Add succeeds and readback finds the item → `CONFIRMED`."""
+        """Criterion 3: Create succeeds, move succeeds, readback finds it → `CONFIRMED`."""
         repo = InMemoryReceiptRepository()
 
-        # Setup transport response for add
-        transport.set_response("taskcreate", "bread", {"id": "task/123"})
+        # Setup transport response for create (returns full task object in default list)
+        transport.set_response(
+            "taskcreate",
+            "bread",
+            {
+                "metaId": "task/123",
+                "text": "bread",
+                "taskListId": "taskList/default",  # Item lands in default list
+            },
+        )
+
+        # Setup transport response for move (succeeds)
+        transport.set_response("taskmove", "task/123", {"ok": True})
+
+        # Setup transport response for readback (item found in target list)
+        items_response = {
+            "listItems": [
+                {
+                    "metaId": "task/123",
+                    "taskListId": "taskList/1",
+                    "text": "bread",
+                    "complete": "false",
+                }
+            ]
+        }
+        transport.set_response("tasklist", "taskList/1", items_response)
+
+        result, items = await service.add_item(
+            principal, "taskList/1", "bread", "op1", repo, "fam1"
+        )
+
+        assert result.outcome == WriteOutcome.CONFIRMED
+        assert result.item_id == "task/123"
+        assert result.actual_list_id == "taskList/default"
+        assert result.requested_list_id == "taskList/1"
+        assert len(items) == 1
+        assert items[0].text == "bread"
+        # Exactly three requests sent: taskcreate, taskmove, tasklist
+        assert len(transport.calls) == 3
+        assert transport.calls[0][0] == "taskcreate"
+        assert transport.calls[1][0] == "taskmove"
+        assert transport.calls[2][0] == "tasklist"
+
+    async def test_add_item_acknowledged_move_succeeds_no_readback(
+        self, service: ListService, transport: FakeTransport, principal: Principal
+    ) -> None:
+        """Criterion 9: Move succeeds but readback does not find item → `ACKNOWLEDGED`."""
+        repo = InMemoryReceiptRepository()
+
+        # Setup transport response for create
+        transport.set_response(
+            "taskcreate",
+            "bread",
+            {
+                "metaId": "task/123",
+                "text": "bread",
+                "taskListId": "taskList/default",
+            },
+        )
+
+        # Setup transport response for move (succeeds)
+        transport.set_response("taskmove", "task/123", {"ok": True})
+
+        # Setup transport response for readback (item NOT found)
+        items_response = {"listItems": []}
+        transport.set_response("tasklist", "taskList/1", items_response)
+
+        result, items = await service.add_item(
+            principal, "taskList/1", "bread", "op1", repo, "fam1"
+        )
+
+        assert result.outcome == WriteOutcome.ACKNOWLEDGED
+        assert result.item_id == "task/123"
+        assert len(items) == 0
+        # Exactly three requests sent: taskcreate, taskmove, tasklist
+        assert len(transport.calls) == 3
+
+    async def test_add_item_no_move_when_already_in_target_list(
+        self, service: ListService, transport: FakeTransport, principal: Principal
+    ) -> None:
+        """Criterion 4: Create response already has target list → no taskmove sent."""
+        repo = InMemoryReceiptRepository()
+
+        # Setup transport response for create (already in the target list!)
+        transport.set_response(
+            "taskcreate",
+            "bread",
+            {
+                "metaId": "task/123",
+                "text": "bread",
+                "taskListId": "taskList/1",  # Already in the requested list
+            },
+        )
 
         # Setup transport response for readback (item found)
         items_response = {
@@ -257,51 +348,30 @@ class TestListServiceMutation:
         transport.set_response("tasklist", "taskList/1", items_response)
 
         result, items = await service.add_item(
-            principal, "taskList/1", "bread", None, "op1", repo, "fam1"
+            principal, "taskList/1", "bread", "op1", repo, "fam1"
         )
 
         assert result.outcome == WriteOutcome.CONFIRMED
-        assert len(items) == 1
-        assert items[0].text == "bread"
-        # Exactly two requests sent: taskcreate and tasklist
+        assert result.item_id == "task/123"
+        assert result.actual_list_id == "taskList/1"
+        # Exactly two requests sent: taskcreate and tasklist (NO taskmove)
+        call_endpoints = [c[0] for c in transport.calls]
+        assert "taskmove" not in call_endpoints
+        assert call_endpoints == ["taskcreate", "tasklist"]
         assert len(transport.calls) == 2
 
-    async def test_add_item_acknowledged(
+    async def test_add_item_create_transport_error(
         self, service: ListService, transport: FakeTransport, principal: Principal
     ) -> None:
-        """Criterion 9: Add succeeds and readback does not find it → `ACKNOWLEDGED`."""
-        repo = InMemoryReceiptRepository()
-
-        # Setup transport response for add
-        transport.set_response("taskcreate", "bread", {"id": "task/123"})
-
-        # Setup transport response for readback (item NOT found)
-        items_response = {"listItems": []}
-        transport.set_response("tasklist", "taskList/1", items_response)
-
-        result, items = await service.add_item(
-            principal, "taskList/1", "bread", None, "op1", repo, "fam1"
-        )
-
-        assert result.outcome == WriteOutcome.ACKNOWLEDGED
-        assert len(items) == 0
-        # Exactly two requests sent: taskcreate and tasklist
-        assert len(transport.calls) == 2
-
-    async def test_add_item_transport_error(
-        self, service: ListService, transport: FakeTransport, principal: Principal
-    ) -> None:
-        """Criterion 10: Add times out (TransportError) → `UNKNOWN`, exactly one request sent."""
+        """Criterion 7: Create fails with TransportError → `UNKNOWN`, no taskmove sent."""
         repo = InMemoryReceiptRepository()
 
         # Create a failing transport that raises TransportError on taskcreate
-        class FailingTransport(FakeTransport):
+        class FailingCreateTransport(FakeTransport):
             async def call(self, endpoint: str, fields: dict[str, str]) -> object:
-                # Record the call first, then decide whether to fail
                 self.calls.append((endpoint, dict(fields)))
                 if endpoint == "taskcreate":
                     raise TransportError()
-                # Don't call super for taskcreate, handle others
                 key_value = (
                     fields.get("a00text", "")
                     or fields.get("a00listId", "")
@@ -317,28 +387,139 @@ class TestListServiceMutation:
                     return {"listItems": []}
                 raise AssertionError(f"Unexpected call: {endpoint} {fields}")
 
-        failing_transport = FailingTransport()
+        failing_transport = FailingCreateTransport()
         failing_service = ListService(failing_transport)
 
         result, items = await failing_service.add_item(
-            principal, "taskList/1", "bread", None, "op1", repo, "fam1"
+            principal, "taskList/1", "bread", "op1", repo, "fam1"
         )
 
         assert result.outcome == WriteOutcome.UNKNOWN
         assert len(items) == 0
-        # taskcreate was attempted before error; exactly one request sent
+        # Only taskcreate was sent, no taskmove
         create_calls = [c for c in failing_transport.calls if c[0] == "taskcreate"]
         assert len(create_calls) == 1
         assert len(failing_transport.calls) == 1
+        move_calls = [c for c in failing_transport.calls if c[0] == "taskmove"]
+        assert len(move_calls) == 0
+
+    async def test_add_item_move_upstream_rejected_error(
+        self, service: ListService, transport: FakeTransport, principal: Principal
+    ) -> None:
+        """Criterion 5: Move raises UpstreamRejectedError → `MISFILED`."""
+        repo = InMemoryReceiptRepository()
+
+        # Create a failing transport that raises UpstreamRejectedError on taskmove
+        class FailingMoveTransport(FakeTransport):
+            async def call(self, endpoint: str, fields: dict[str, str]) -> object:
+                self.calls.append((endpoint, dict(fields)))
+                if endpoint == "taskmove":
+                    raise UpstreamRejectedError()
+                key_value = fields.get("a00text", "") or fields.get("a00taskId", "") or ""
+                key = (endpoint, key_value)
+                if key in self.responses:
+                    return self.responses[key]
+                if endpoint == "taskgettasklists":
+                    return {"taskLists": []}
+                if endpoint == "tasklist":
+                    return {"listItems": []}
+                raise AssertionError(f"Unexpected call: {endpoint} {fields}")
+
+        failing_transport = FailingMoveTransport()
+        # Set up the response for create
+        failing_transport.set_response(
+            "taskcreate",
+            "bread",
+            {
+                "metaId": "task/123",
+                "text": "bread",
+                "taskListId": "taskList/default",
+            },
+        )
+
+        failing_service = ListService(failing_transport)
+
+        result, items = await failing_service.add_item(
+            principal, "taskList/1", "bread", "op1", repo, "fam1"
+        )
+
+        assert result.outcome == WriteOutcome.MISFILED
+        assert result.item_id == "task/123"
+        assert result.actual_list_id == "taskList/default"
+        assert result.requested_list_id == "taskList/1"
+        assert len(items) == 0
+        # taskcreate and taskmove were sent, but no tasklist readback
+        assert len(failing_transport.calls) == 2
+        assert failing_transport.calls[0][0] == "taskcreate"
+        assert failing_transport.calls[1][0] == "taskmove"
+
+    async def test_add_item_move_transport_error(
+        self, service: ListService, transport: FakeTransport, principal: Principal
+    ) -> None:
+        """Criterion 6: Move raises TransportError → `MISFILED`, not `UNKNOWN`."""
+        repo = InMemoryReceiptRepository()
+
+        # Create a failing transport that raises TransportError on taskmove
+        class FailingMoveTransport(FakeTransport):
+            async def call(self, endpoint: str, fields: dict[str, str]) -> object:
+                self.calls.append((endpoint, dict(fields)))
+                if endpoint == "taskmove":
+                    raise TransportError()
+                key_value = fields.get("a00text", "") or fields.get("a00taskId", "") or ""
+                key = (endpoint, key_value)
+                if key in self.responses:
+                    return self.responses[key]
+                if endpoint == "taskgettasklists":
+                    return {"taskLists": []}
+                if endpoint == "tasklist":
+                    return {"listItems": []}
+                raise AssertionError(f"Unexpected call: {endpoint} {fields}")
+
+        failing_transport = FailingMoveTransport()
+        # Set up the response for create
+        failing_transport.set_response(
+            "taskcreate",
+            "bread",
+            {
+                "metaId": "task/123",
+                "text": "bread",
+                "taskListId": "taskList/default",
+            },
+        )
+
+        failing_service = ListService(failing_transport)
+
+        result, items = await failing_service.add_item(
+            principal, "taskList/1", "bread", "op1", repo, "fam1"
+        )
+
+        # TransportError on move → MISFILED, not UNKNOWN (create succeeded)
+        assert result.outcome == WriteOutcome.MISFILED
+        assert result.item_id == "task/123"
+        assert result.actual_list_id == "taskList/default"
+        assert result.requested_list_id == "taskList/1"
 
     async def test_add_item_twice_different_operation_ids(
         self, service: ListService, transport: FakeTransport, principal: Principal
     ) -> None:
-        """Criterion 11: Adding "bread" twice with different operation_ids creates two items."""
+        """Criterion 8: Adding "bread" twice with different operation_ids creates two items."""
         repo = InMemoryReceiptRepository()
 
         # Setup transport responses
-        transport.set_response("taskcreate", "bread", {"id": "task/123"})
+        transport.set_response(
+            "taskcreate",
+            "bread",
+            {
+                "metaId": "task/123",
+                "text": "bread",
+                "taskListId": "taskList/1",
+            },
+        )
+
+        # Setup move response (succeeds)
+        transport.set_response("taskmove", "task/123", {"ok": True})
+
+        # Setup readback response
         items_response_1 = {
             "listItems": [
                 {
@@ -352,9 +533,7 @@ class TestListServiceMutation:
         transport.set_response("tasklist", "taskList/1", items_response_1)
 
         # First add
-        result1, _ = await service.add_item(
-            principal, "taskList/1", "bread", None, "op1", repo, "fam1"
-        )
+        result1, _ = await service.add_item(principal, "taskList/1", "bread", "op1", repo, "fam1")
         assert result1.outcome == WriteOutcome.CONFIRMED
         create_calls_1 = len([c for c in transport.calls if c[0] == "taskcreate"])
         assert create_calls_1 == 1
@@ -363,59 +542,85 @@ class TestListServiceMutation:
         transport.calls.clear()
 
         # Second add with different operation_id (creates duplicate item)
-        result2, _ = await service.add_item(
-            principal, "taskList/1", "bread", None, "op2", repo, "fam1"
-        )
+        result2, _ = await service.add_item(principal, "taskList/1", "bread", "op2", repo, "fam1")
         assert result2.outcome == WriteOutcome.CONFIRMED
         create_calls_2 = len([c for c in transport.calls if c[0] == "taskcreate"])
         assert create_calls_2 == 1
-        # Two different operation_ids → two requests sent
+        # Two different operation_ids → two separate sets of calls
 
     async def test_add_item_replay_same_operation_id(
         self, service: ListService, transport: FakeTransport, principal: Principal
     ) -> None:
-        """Criterion 12: Replaying one operation_id with same payload sends nothing,
-        returns stored result."""
+        """Criterion 10: Replaying after MISFILED returns stored result, zero calls."""
         repo = InMemoryReceiptRepository()
 
-        # Setup transport response
-        transport.set_response("taskcreate", "bread", {"id": "task/123"})
-        items_response = {
-            "listItems": [
-                {
-                    "metaId": "task/123",
-                    "taskListId": "taskList/1",
-                    "text": "bread",
-                    "complete": "false",
-                }
-            ]
-        }
-        transport.set_response("tasklist", "taskList/1", items_response)
+        # Setup move to fail (UpstreamRejectedError)
+        class RejectingTransport(FakeTransport):
+            async def call(self, endpoint: str, fields: dict[str, str]) -> object:
+                self.calls.append((endpoint, dict(fields)))
+                if endpoint == "taskmove":
+                    raise UpstreamRejectedError()
+                key_value = fields.get("a00text", "") or fields.get("a00taskId", "") or ""
+                key = (endpoint, key_value)
+                if key in self.responses:
+                    return self.responses[key]
+                if endpoint == "taskgettasklists":
+                    return {"taskLists": []}
+                if endpoint == "tasklist":
+                    return {"listItems": []}
+                raise AssertionError(f"Unexpected call: {endpoint} {fields}")
 
-        # First call
-        result1, items1 = await service.add_item(
-            principal, "taskList/1", "bread", None, "op1", repo, "fam1"
+        rejecting_transport = RejectingTransport()
+        # Set up the response for create
+        rejecting_transport.set_response(
+            "taskcreate",
+            "bread",
+            {
+                "metaId": "task/123",
+                "text": "bread",
+                "taskListId": "taskList/default",
+            },
         )
-        assert result1.outcome == WriteOutcome.CONFIRMED
 
-        # Second call with same operation_id and payload
-        transport.calls.clear()
-        result2, items2 = await service.add_item(
-            principal, "taskList/1", "bread", None, "op1", repo, "fam1"
+        rejecting_service = ListService(rejecting_transport)
+
+        # First call results in MISFILED
+        result1, _ = await rejecting_service.add_item(
+            principal, "taskList/1", "bread", "op1", repo, "fam1"
         )
-        # Should return stored result without sending requests
-        assert result2.outcome == WriteOutcome.CONFIRMED
-        assert len(transport.calls) == 0  # Zero requests sent
+        assert result1.outcome == WriteOutcome.MISFILED
+
+        # Second call with same operation_id and payload (using rejecting transport)
+        rejecting_transport.calls.clear()
+        result2, items2 = await rejecting_service.add_item(
+            principal, "taskList/1", "bread", "op1", repo, "fam1"
+        )
+        # Should return stored MISFILED result without sending requests
+        assert result2.outcome == WriteOutcome.MISFILED
+        assert result2.item_id == result1.item_id
+        assert len(rejecting_transport.calls) == 0  # Zero requests sent
 
     async def test_add_item_replay_different_payload(
         self, service: ListService, transport: FakeTransport, principal: Principal
     ) -> None:
-        """Criterion 13: Replaying operation_id with different payload raises,
-        sends ZERO requests."""
+        """Criterion 13: Replay with different payload raises, sends zero requests."""
         repo = InMemoryReceiptRepository()
 
         # Setup for first add
-        transport.set_response("taskcreate", "bread", {"id": "task/123"})
+        transport.set_response(
+            "taskcreate",
+            "bread",
+            {
+                "metaId": "task/123",
+                "text": "bread",
+                "taskListId": "taskList/1",
+            },
+        )
+
+        # Setup move response
+        transport.set_response("taskmove", "task/123", {"ok": True})
+
+        # Setup readback response
         items_response = {
             "listItems": [
                 {
@@ -429,12 +634,12 @@ class TestListServiceMutation:
         transport.set_response("tasklist", "taskList/1", items_response)
 
         # First call with "bread"
-        await service.add_item(principal, "taskList/1", "bread", None, "op1", repo, "fam1")
+        await service.add_item(principal, "taskList/1", "bread", "op1", repo, "fam1")
         transport.calls.clear()
 
         # Second call with same operation_id but different text ("milk")
         with pytest.raises(FamilyWallError) as exc_info:
-            await service.add_item(principal, "taskList/1", "milk", None, "op1", repo, "fam1")
+            await service.add_item(principal, "taskList/1", "milk", "op1", repo, "fam1")
         assert exc_info.value.info.code == "operation_id_conflict"
         # Zero requests sent for different payload
         assert len(transport.calls) == 0
@@ -461,20 +666,33 @@ class TestListServiceMutation:
 
         # Now attempt the same operation
         result, items = await service.add_item(
-            principal, "taskList/1", "bread", None, "crashed_op", repo, "fam1"
+            principal, "taskList/1", "bread", "crashed_op", repo, "fam1"
         )
         # Pending receipt resolves to UNKNOWN
         assert result.outcome == WriteOutcome.UNKNOWN
         # Zero requests sent (receipt was found pending)
         assert len(transport.calls) == 0
 
-    async def test_add_item_with_quantity(
+    async def test_add_item_second_item_same_list(
         self, service: ListService, transport: FakeTransport, principal: Principal
     ) -> None:
-        """Criterion 19: A result that sets a quantity reports the quantity as unverified."""
+        """Adding a second item to the same list succeeds."""
         repo = InMemoryReceiptRepository()
 
-        transport.set_response("taskcreate", "milk", {"id": "task/124"})
+        transport.set_response(
+            "taskcreate",
+            "milk",
+            {
+                "metaId": "task/124",
+                "text": "milk",
+                "taskListId": "taskList/1",
+            },
+        )
+
+        # Setup move response (succeeds)
+        transport.set_response("taskmove", "task/124", {"ok": True})
+
+        # Setup readback response
         items_response = {
             "listItems": [
                 {
@@ -487,12 +705,12 @@ class TestListServiceMutation:
         }
         transport.set_response("tasklist", "taskList/1", items_response)
 
-        result, items = await service.add_item(
-            principal, "taskList/1", "milk", "2 liters", "op1", repo, "fam1"
-        )
+        result, items = await service.add_item(principal, "taskList/1", "milk", "op1", repo, "fam1")
 
         assert result.outcome == WriteOutcome.CONFIRMED
-        assert result.quantity_written == "2 liters"
+        assert result.item_id == "task/124"
+        assert len(items) == 1
+        assert items[0].text == "milk"
 
     async def test_set_item_checked_success(
         self, service: ListService, transport: FakeTransport, principal: Principal
@@ -709,12 +927,23 @@ class TestListServiceMutation:
     async def test_unicode_item_title_roundtrip(
         self, service: ListService, transport: FakeTransport, principal: Principal
     ) -> None:
-        """Criterion 18: A Unicode item title round-trips."""
+        """A Unicode item title round-trips."""
         repo = InMemoryReceiptRepository()
 
         unicode_text = "Café ☕"
 
-        transport.set_response("taskcreate", unicode_text, {"id": "task/125"})
+        transport.set_response(
+            "taskcreate",
+            unicode_text,
+            {
+                "metaId": "task/125",
+                "text": unicode_text,
+                "taskListId": "taskList/1",
+            },
+        )
+
+        # Setup move response (succeeds)
+        transport.set_response("taskmove", "task/125", {"ok": True})
 
         items_response = {
             "listItems": [
@@ -729,7 +958,7 @@ class TestListServiceMutation:
         transport.set_response("tasklist", "taskList/1", items_response)
 
         result, items = await service.add_item(
-            principal, "taskList/1", unicode_text, None, "op1", repo, "fam1"
+            principal, "taskList/1", unicode_text, "op1", repo, "fam1"
         )
 
         assert result.outcome == WriteOutcome.CONFIRMED
@@ -753,7 +982,7 @@ class TestListServiceMutation:
         failing_service = ListService(failing_transport)
 
         result, items = await failing_service.add_item(
-            principal, "taskList/1", "bread", None, "op1", repo, "fam1"
+            principal, "taskList/1", "bread", "op1", repo, "fam1"
         )
 
         assert result.outcome == WriteOutcome.UNKNOWN
@@ -779,6 +1008,4 @@ class TestListServiceMutation:
 
         # UpstreamRejectedError should propagate, not become UNKNOWN
         with pytest.raises(UpstreamRejectedError):
-            await failing_service.add_item(
-                principal, "taskList/1", "bread", None, "op1", repo, "fam1"
-            )
+            await failing_service.add_item(principal, "taskList/1", "bread", "op1", repo, "fam1")

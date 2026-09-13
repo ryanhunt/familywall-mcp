@@ -345,36 +345,46 @@ def build_get_list_fields(list_id: str) -> dict[str, str]:
     return {"partnerScope": "Family", "a00listId": list_id}
 
 
-def build_create_item_fields(list_id: str, text: str, quantity: str | None) -> dict[str, str]:
+def build_create_item_fields(text: str) -> dict[str, str]:
     """Build request fields for create-item operation.
 
+    Creates an item in the default list. Use taskmove to place it in a specific list.
+
     Args:
-        list_id: The owning list's metaId (must have taskList/ prefix)
         text: Item text (will be used as-is)
-        quantity: Optional quantity as a string. Passed verbatim; empty string
-                  raises MalformedPayloadError.
 
     Returns:
-        Dict with partnerScope, a00taskListId, a00text, and a00quantity (if quantity is not None).
-
-    Raises:
-        MalformedPayloadError if quantity is an empty string or list_id has wrong prefix.
+        Dict with partnerScope and a00text fields only.
     """
-    _validate_prefix(list_id, "taskList/")
-
-    if quantity is not None and quantity == "":
-        raise MalformedPayloadError()
-
-    fields: dict[str, str] = {
+    return {
         "partnerScope": "Family",
-        "a00taskListId": list_id,
         "a00text": text,
     }
 
-    if quantity is not None:
-        fields["a00quantity"] = quantity
 
-    return fields
+def build_move_item_fields(item_id: str, list_id: str) -> dict[str, str]:
+    """Build request fields for move-item operation.
+
+    Args:
+        item_id: The item's metaId (must have task/ prefix)
+        list_id: The destination list's metaId (must have taskList/ prefix)
+
+    Returns:
+        Dict with partnerScope, a00taskId, and a00taskListId fields.
+        Note: prevTaskId and taskCategoryId exist in the real signature but are
+        not sent by v1 — see ADR 0002.
+
+    Raises:
+        MalformedPayloadError if item_id or list_id have wrong prefixes.
+    """
+    _validate_prefix(item_id, "task/")
+    _validate_prefix(list_id, "taskList/")
+
+    return {
+        "partnerScope": "Family",
+        "a00taskId": item_id,
+        "a00taskListId": list_id,
+    }
 
 
 def build_mark_item_fields(item_id: str, completed: bool) -> dict[str, str]:

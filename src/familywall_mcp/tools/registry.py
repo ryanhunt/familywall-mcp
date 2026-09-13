@@ -81,8 +81,9 @@ class AddListItemResponse(DomainModel):
 
     family_name: str
     outcome: str
-    quantity_written: str | None
     item_id: str | None
+    actual_list_id: str | None = None  # For misfiled: where the item actually is
+    requested_list_id: str | None = None  # For misfiled: where it was supposed to go
 
 
 class SetListItemCheckedResponse(DomainModel):
@@ -321,17 +322,20 @@ class ToolRegistry:
         self,
         text: str,
         list_id: str | None = None,
-        quantity: str | None = None,
         idempotency_key: str | None = None,
     ) -> AddListItemResponse | ErrorResponse:
-        """Add an item to a list.
+        """Add an item to a list (via create-then-move).
+
+        Creates the item in the default list, then moves it to the requested list if needed.
+        The operation is non-atomic: if create succeeds but move fails, the item exists in
+        the default list and a 'misfiled' outcome is returned. No automatic retry or delete
+        is performed.
 
         If writes are disabled, returns an error response with zero upstream calls.
 
         Args:
             text: The item text.
             list_id: Optional list ID to add to; if not provided, uses default or only list.
-            quantity: Optional quantity (stored but not verified on readback).
             idempotency_key: Optional operation ID for idempotency; generates UUID if not provided.
 
         Returns:
@@ -367,7 +371,6 @@ class ToolRegistry:
                 self._principal,
                 selection.resolved.list_id,
                 text,
-                quantity,
                 operation_id,
                 self._receipt_repository,
                 self._family_context.family_id,
@@ -376,8 +379,9 @@ class ToolRegistry:
             return AddListItemResponse(
                 family_name=self._discovered_family.name,
                 outcome=result.outcome.value,
-                quantity_written=result.quantity_written,
                 item_id=result.item_id,
+                actual_list_id=result.actual_list_id,
+                requested_list_id=result.requested_list_id,
             )
         except FamilyWallError as exc:
             return ErrorResponse(

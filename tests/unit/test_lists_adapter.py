@@ -391,35 +391,66 @@ class TestRequestFieldBuilders:
         with pytest.raises(MalformedPayloadError):
             build_get_list_fields("invalid/101")
 
-    def test_build_create_item_fields_with_quantity(self) -> None:
-        """Criterion 11: build_create_item_fields includes quantity when given."""
-        fields = build_create_item_fields("taskList/101", "Milk", "2L")
+    def test_build_create_item_fields_minimal(self) -> None:
+        """Criterion 1: build_create_item_fields emits exactly partnerScope and a00text."""
+        fields = build_create_item_fields("Milk")
         assert fields == {
             "partnerScope": "Family",
-            "a00taskListId": "taskList/101",
             "a00text": "Milk",
-            "a00quantity": "2L",
         }
+        assert len(fields) == 2
+        assert "a00quantity" not in fields
+        assert "a00taskListId" not in fields
+        assert "a00listId" not in fields
 
-    def test_build_create_item_fields_without_quantity(self) -> None:
-        """Criterion 11: build_create_item_fields omits quantity when None."""
-        fields = build_create_item_fields("taskList/101", "Bread", None)
+    def test_build_create_item_fields_no_list_id_parameter(self) -> None:
+        """Criterion 1: build_create_item_fields no longer accepts list_id."""
+        # This should raise TypeError at runtime since list_id is not a parameter
+        with pytest.raises(TypeError):
+            build_create_item_fields("taskList/101", "Bread")  # type: ignore
+
+    def test_build_create_item_fields_no_quantity_parameter(self) -> None:
+        """Criterion 1: build_create_item_fields no longer accepts quantity."""
+        # This should raise TypeError since quantity is not a parameter
+        with pytest.raises(TypeError):
+            build_create_item_fields("Bread", None)  # type: ignore
+
+    def test_build_create_item_fields_unicode_text(self) -> None:
+        """build_create_item_fields preserves Unicode in text."""
+        fields = build_create_item_fields("Café ☕")
+        assert fields["a00text"] == "Café ☕"
+
+    def test_build_move_item_fields_valid(self) -> None:
+        """Criterion 2: build_move_item_fields emits exactly three fields."""
+        from familywall_mcp.familywall.lists import build_move_item_fields
+
+        fields = build_move_item_fields("task/201", "taskList/101")
         assert fields == {
             "partnerScope": "Family",
+            "a00taskId": "task/201",
             "a00taskListId": "taskList/101",
-            "a00text": "Bread",
         }
-        assert "a00quantity" not in fields
+        assert len(fields) == 3
 
-    def test_build_create_item_fields_quantity_verbatim(self) -> None:
-        """Criterion 11: Quantity passed verbatim including spaces and Unicode."""
-        fields = build_create_item_fields("taskList/101", "Coffee", "2 kg, arabica ☕")
-        assert fields["a00quantity"] == "2 kg, arabica ☕"
+    def test_build_move_item_fields_validates_item_prefix(self) -> None:
+        """Criterion 2: build_move_item_fields rejects wrong item prefix."""
+        from familywall_mcp.familywall.lists import build_move_item_fields
 
-    def test_build_create_item_fields_empty_quantity_raises(self) -> None:
-        """Criterion 11: Empty string quantity raises MalformedPayloadError."""
         with pytest.raises(MalformedPayloadError):
-            build_create_item_fields("taskList/101", "Test", "")
+            build_move_item_fields("taskList/201", "taskList/101")
+
+        with pytest.raises(MalformedPayloadError):
+            build_move_item_fields("invalid/201", "taskList/101")
+
+    def test_build_move_item_fields_validates_list_prefix(self) -> None:
+        """Criterion 2: build_move_item_fields rejects wrong list prefix."""
+        from familywall_mcp.familywall.lists import build_move_item_fields
+
+        with pytest.raises(MalformedPayloadError):
+            build_move_item_fields("task/201", "task/101")
+
+        with pytest.raises(MalformedPayloadError):
+            build_move_item_fields("task/201", "invalid/101")
 
     def test_build_mark_item_fields_completed_true(self) -> None:
         """Criterion 12: build_mark_item_fields with completed=True."""

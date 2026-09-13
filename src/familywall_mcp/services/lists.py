@@ -20,6 +20,7 @@ from familywall_mcp.errors import (
     RateLimitedError,
     TransportError,
     UnsupportedConfigurationError,
+    UpstreamRejectedError,
 )
 from familywall_mcp.familywall.lists import (
     ListItem,
@@ -29,6 +30,7 @@ from familywall_mcp.familywall.lists import (
     build_get_list_fields,
     build_get_lists_fields,
     build_mark_item_fields,
+    build_move_item_fields,
     parse_list_items,
     parse_list_summaries,
 )
@@ -62,10 +64,11 @@ class ListTransport(Protocol):
 
 
 class WriteOutcome(StrEnum):
-    """Three-state outcome of a mutation operation."""
+    """Four-state outcome of a mutation operation."""
 
     CONFIRMED = "confirmed"  # upstream acknowledged AND a readback shows it
     ACKNOWLEDGED = "acknowledged"  # upstream said ok, readback did not confirm
+    MISFILED = "misfiled"  # created, but it is in the wrong list
     UNKNOWN = "unknown"  # lost, timed out, or unparseable
 
 
@@ -81,8 +84,9 @@ class AddItemResult(DomainModel):
     """Result of adding an item to a list."""
 
     outcome: WriteOutcome
-    quantity_written: str | None  # unverified: cannot be read back
-    item_id: str | None = None  # populated if confirmed or acknowledged
+    item_id: str | None = None  # populated if confirmed, acknowledged, or misfiled
+    actual_list_id: str | None = None  # the list it actually landed in (for misfiled)
+    requested_list_id: str | None = None  # the list that was requested (for misfiled)
 
 
 class SetItemCheckedResult(DomainModel):
@@ -219,37 +223,40 @@ class ListService:
         principal: Principal,
         list_id: str,
         text: str,
-        quantity: str | None,
         operation_id: str,
         receipt_repository: ReceiptRepository,
         family_id: str,
     ) -> tuple[AddItemResult, tuple[ListItem, ...]]:
-        """Add an item to a list and verify it appears in a readback.
+        """Add an item to a list via create-then-move.
 
         Implements receipt-based idempotency for deduplication and crash recovery.
-        UNKNOWN outcomes are never retried automatically.
+        Creates in the default list, then moves to the requested list if necessary.
+
+        The operation is non-atomic: if create succeeds but move fails, the item exists
+        in the default list and a MISFILED outcome is returned. No automatic retry or
+        delete is performed. See ADR 0002.
 
         Args:
             principal: The authenticated subject.
-            list_id: The list metaId (taskList/...)
+            list_id: The requested list metaId (taskList/...)
             text: The item text.
-            quantity: Optional quantity (unverified, cannot be read back).
             operation_id: Operation ID supplied by caller; must not be empty.
             receipt_repository: Repository for receipt tracking and idempotency.
             family_id: Family ID for receipt scoping.
 
         Returns:
-            Tuple of (AddItemResult with outcome, updated items in list).
+            Tuple of (AddItemResult with outcome, updated items in requested list or empty).
 
         Raises:
-            FamilyWallError: If operation_id conflicts with existing receipt (different payload).
+            FamilyWallError: If operation_id conflicts with existing receipt.
             ValueError: If operation_id is empty.
         """
         if not operation_id or not operation_id.strip():
             raise ValueError("operation_id must not be empty")
 
-        fields = build_create_item_fields(list_id, text, quantity)
-        payload_hash = self._compute_payload_hash(fields)
+        # Build create fields (text only, no list ID, no quantity)
+        create_fields = build_create_item_fields(text)
+        payload_hash = self._compute_payload_hash(create_fields)
 
         # Check receipt repository for existing operation
         existing_receipt = await receipt_repository.get(principal, operation_id)
@@ -257,7 +264,7 @@ class ListService:
             # If status is pending (previous process crashed mid-write), resolve to UNKNOWN
             if existing_receipt.status == "pending":
                 return (
-                    AddItemResult(outcome=WriteOutcome.UNKNOWN, quantity_written=quantity),
+                    AddItemResult(outcome=WriteOutcome.UNKNOWN),
                     (),
                 )
             # Check if payload matches (for succeeded/unknown receipts)
@@ -275,15 +282,23 @@ class ListService:
                 try:
                     result_data = json.loads(existing_receipt.upstream_id)
                     stored_outcome = WriteOutcome(result_data.get("outcome", "acknowledged"))
+                    stored_item_id = result_data.get("item_id")
+                    stored_actual_list_id = result_data.get("actual_list_id")
+                    stored_requested_list_id = result_data.get("requested_list_id")
                     return (
-                        AddItemResult(outcome=stored_outcome, quantity_written=quantity),
+                        AddItemResult(
+                            outcome=stored_outcome,
+                            item_id=stored_item_id,
+                            actual_list_id=stored_actual_list_id,
+                            requested_list_id=stored_requested_list_id,
+                        ),
                         (),
                     )
                 except (json.JSONDecodeError, ValueError):
                     pass
             # Fallback: if status is succeeded, return acknowledged
             return (
-                AddItemResult(outcome=WriteOutcome.ACKNOWLEDGED, quantity_written=quantity),
+                AddItemResult(outcome=WriteOutcome.ACKNOWLEDGED),
                 (),
             )
 
@@ -300,12 +315,11 @@ class ListService:
         )
         await receipt_repository.put(pending_receipt)
 
-        # Send the request
+        # Step 1: Create the item (always in default list)
         try:
-            await self.transport.call("taskcreate", fields)
+            create_response = await self.transport.call("taskcreate", create_fields)
         except (TransportError, RateLimitedError, InvalidEnvelopeError, MalformedPayloadError):
-            # Request left the process; outcome is unknown (network error, rate limit,
-            # unparseable response). Do not retry. Programming errors propagate as themselves.
+            # Create failed indeterminately. Outcome is unknown.
             unknown_receipt = OperationReceipt(
                 subject=principal.subject,
                 family_id=family_id,
@@ -318,20 +332,195 @@ class ListService:
             )
             await receipt_repository.put(unknown_receipt)
             return (
-                AddItemResult(outcome=WriteOutcome.UNKNOWN, quantity_written=quantity),
+                AddItemResult(outcome=WriteOutcome.UNKNOWN),
                 (),
             )
 
-        # Re-read the list to confirm the item was added
-        items = await self.get_list_items(principal, list_id)
+        # Parse create response: expecting a full task object with metaId and taskListId
+        if not isinstance(create_response, dict):
+            unknown_receipt = OperationReceipt(
+                subject=principal.subject,
+                family_id=family_id,
+                list_id=list_id,
+                operation_id=operation_id,
+                payload_hash=payload_hash,
+                status="unknown",
+                upstream_id=None,
+                expires_at=datetime.now(UTC) + timedelta(hours=24),
+            )
+            await receipt_repository.put(unknown_receipt)
+            return (
+                AddItemResult(outcome=WriteOutcome.UNKNOWN),
+                (),
+            )
 
-        # Look for the newly added item (exact text match, any item ID)
-        found = any(item.text == text for item in items)
+        # Extract item ID and actual list from response
+        created_item_id = create_response.get("metaId") or create_response.get("taskId")
+        created_list_id = create_response.get("taskListId")
 
+        if not created_item_id or not created_list_id:
+            unknown_receipt = OperationReceipt(
+                subject=principal.subject,
+                family_id=family_id,
+                list_id=list_id,
+                operation_id=operation_id,
+                payload_hash=payload_hash,
+                status="unknown",
+                upstream_id=None,
+                expires_at=datetime.now(UTC) + timedelta(hours=24),
+            )
+            await receipt_repository.put(unknown_receipt)
+            return (
+                AddItemResult(outcome=WriteOutcome.UNKNOWN),
+                (),
+            )
+
+        # Step 2: Decide if we need to move
+        # If it's already in the requested list, skip the move entirely
+        if created_list_id == list_id:
+            # Item is already in the right list; no move needed
+            result_data = {
+                "outcome": WriteOutcome.CONFIRMED.value,
+                "item_id": created_item_id,
+                "actual_list_id": created_list_id,
+                "requested_list_id": list_id,
+            }
+            final_receipt = OperationReceipt(
+                subject=principal.subject,
+                family_id=family_id,
+                list_id=list_id,
+                operation_id=operation_id,
+                payload_hash=payload_hash,
+                status="succeeded",
+                upstream_id=json.dumps(result_data),
+                expires_at=datetime.now(UTC) + timedelta(hours=24),
+            )
+            await receipt_repository.put(final_receipt)
+
+            # Read back to confirm
+            items = await self.get_list_items(principal, list_id)
+            found = any(item.item_id == created_item_id for item in items)
+            outcome = WriteOutcome.CONFIRMED if found else WriteOutcome.ACKNOWLEDGED
+
+            return (
+                AddItemResult(
+                    outcome=outcome,
+                    item_id=created_item_id,
+                    actual_list_id=created_list_id,
+                    requested_list_id=list_id,
+                ),
+                items,
+            )
+
+        # Step 3: Move is needed
+        move_fields = build_move_item_fields(created_item_id, list_id)
+
+        try:
+            await self.transport.call("taskmove", move_fields)
+        except UpstreamRejectedError:
+            # Definite failure: move was rejected by the server
+            # The item is definitely in created_list_id (the default list)
+            result_data = {
+                "outcome": WriteOutcome.MISFILED.value,
+                "item_id": created_item_id,
+                "actual_list_id": created_list_id,
+                "requested_list_id": list_id,
+            }
+            misfiled_receipt = OperationReceipt(
+                subject=principal.subject,
+                family_id=family_id,
+                list_id=list_id,
+                operation_id=operation_id,
+                payload_hash=payload_hash,
+                status="succeeded",
+                upstream_id=json.dumps(result_data),
+                expires_at=datetime.now(UTC) + timedelta(hours=24),
+            )
+            await receipt_repository.put(misfiled_receipt)
+            return (
+                AddItemResult(
+                    outcome=WriteOutcome.MISFILED,
+                    item_id=created_item_id,
+                    actual_list_id=created_list_id,
+                    requested_list_id=list_id,
+                ),
+                (),
+            )
+        except (TransportError, RateLimitedError, InvalidEnvelopeError, MalformedPayloadError):
+            # Indeterminate failure: we don't know if the move happened
+            # The create definitely happened, so we know the item's id and location
+            # No retry, no delete. Report misfiled.
+            result_data = {
+                "outcome": WriteOutcome.MISFILED.value,
+                "item_id": created_item_id,
+                "actual_list_id": created_list_id,
+                "requested_list_id": list_id,
+            }
+            misfiled_receipt = OperationReceipt(
+                subject=principal.subject,
+                family_id=family_id,
+                list_id=list_id,
+                operation_id=operation_id,
+                payload_hash=payload_hash,
+                status="succeeded",
+                upstream_id=json.dumps(result_data),
+                expires_at=datetime.now(UTC) + timedelta(hours=24),
+            )
+            await receipt_repository.put(misfiled_receipt)
+            return (
+                AddItemResult(
+                    outcome=WriteOutcome.MISFILED,
+                    item_id=created_item_id,
+                    actual_list_id=created_list_id,
+                    requested_list_id=list_id,
+                ),
+                (),
+            )
+
+        # Move succeeded. Now try to read back to confirm
+        try:
+            items = await self.get_list_items(principal, list_id)
+        except (TransportError, RateLimitedError, InvalidEnvelopeError, MalformedPayloadError):
+            # Readback failed; we know the move was sent and no definite rejection occurred
+            # so it may have succeeded. Report as acknowledged.
+            result_data = {
+                "outcome": WriteOutcome.ACKNOWLEDGED.value,
+                "item_id": created_item_id,
+                "actual_list_id": created_list_id,
+                "requested_list_id": list_id,
+            }
+            final_receipt = OperationReceipt(
+                subject=principal.subject,
+                family_id=family_id,
+                list_id=list_id,
+                operation_id=operation_id,
+                payload_hash=payload_hash,
+                status="succeeded",
+                upstream_id=json.dumps(result_data),
+                expires_at=datetime.now(UTC) + timedelta(hours=24),
+            )
+            await receipt_repository.put(final_receipt)
+            return (
+                AddItemResult(
+                    outcome=WriteOutcome.ACKNOWLEDGED,
+                    item_id=created_item_id,
+                    actual_list_id=created_list_id,
+                    requested_list_id=list_id,
+                ),
+                (),
+            )
+
+        # Look for the newly moved item in the target list
+        found = any(item.item_id == created_item_id for item in items)
         outcome = WriteOutcome.CONFIRMED if found else WriteOutcome.ACKNOWLEDGED
 
         # Update receipt with final status
-        result_data = {"outcome": outcome.value}
+        result_data = {
+            "outcome": outcome.value,
+            "item_id": created_item_id,
+            "actual_list_id": created_list_id,
+            "requested_list_id": list_id,
+        }
         final_receipt = OperationReceipt(
             subject=principal.subject,
             family_id=family_id,
@@ -345,7 +534,12 @@ class ListService:
         await receipt_repository.put(final_receipt)
 
         return (
-            AddItemResult(outcome=outcome, quantity_written=quantity),
+            AddItemResult(
+                outcome=outcome,
+                item_id=created_item_id,
+                actual_list_id=created_list_id,
+                requested_list_id=list_id,
+            ),
             items,
         )
 
