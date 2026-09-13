@@ -328,11 +328,16 @@ Request: `a00name`, `a00taskListType` in `SHOPPING` / `TODO` / `OTHER`.
 Evidence: `source-tested` (lists.test.ts:132-161). Deferred to P8; recorded here
 so the type vocabulary is not re-derived later.
 
-### Not available
+### Item edit and delete — evidence found 2026-09-14
 
-Item edit and item delete have **no endpoint evidence** in the reference client.
-They are excluded from v1 and from cleanup procedures; test items created during
-acceptance are removed through the FamilyWall UI.
+The reference TypeScript client has no item edit or delete call, which earlier
+led this contract to state that no such endpoint exists. That was wrong. The web
+client declares `taskdelete(["taskId"])` and
+`taskupdate(["taskId","text","dueDate","assignee","reminder"])`.
+
+Neither has been exercised against the live service by this project, so both are
+evidence level `source-only` (web client). They remain outside v1 scope, but
+cleanup of test items no longer necessarily requires the FamilyWall UI.
 
 ## Mutation acknowledgement
 
@@ -425,6 +430,67 @@ refused or reported as not stored.
 
 Not exercised. The check could not reach it, because no item could be created in
 the target list and the rules forbade marking items the run did not create.
+
+## Endpoint signatures from the web client — 2026-09-14, `live-verified`
+
+The FamilyWall web app's own JavaScript bundle is served publicly as a static
+asset at `https://www.familywall.com/generated/public/js/startupmodule.js`. It
+declares each endpoint's parameter list literally. No credentials were used and
+no request was made to the API to obtain this.
+
+Verified fragments, quoted from the bundle:
+
+| Endpoint | Declared parameters |
+| --- | --- |
+| `taskcreate` | `["text","dueDate","assignee","reminder"]` |
+| `taskmove` | `["taskId","taskListId","prevTaskId","taskCategoryId"]` |
+| `taskmark` | `["taskId","complete","completedDateForTesting"]` |
+| `taskupdate` | `["taskId","text","dueDate","assignee","reminder"]` |
+| `taskdelete` | `["taskId"]` |
+| `tasklist` | `["listId"]` |
+| `taskcreatelist` | `[{encode:...}]` |
+| `taskcreate2` | `[{encode:...},"picture"]` |
+
+### This explains the blocking finding
+
+**`taskcreate` has no list parameter at all.** It was never ignoring our field —
+the parameter does not exist in the endpoint's schema, which is why all four
+spellings behaved identically and every item landed in the default list.
+
+The web client creates a task in a chosen list in **two steps**:
+
+1. `taskcreate` with the content — the task is created in the default list;
+2. `taskmove` with `taskId` and the destination `taskListId` — the task is then
+   placed in the intended list. `prevTaskId` orders it and `taskCategoryId`
+   places it within a category.
+
+Observed call sites in the bundle confirm the shape, including
+`taskmove({taskId: ..., prevTaskId: ..., taskCategoryId: ...})` and a
+category-header variant passing `taskCategoryId` with the `$empty` sentinel.
+
+**The consequence for this project is that an add is not atomic.** A successful
+`taskcreate` followed by a failed `taskmove` leaves the item sitting in the
+default list — a partial write that is visible to the family. The three-state
+write machine must represent that case explicitly rather than reporting a clean
+success or a clean failure. It is a distinct outcome from both `acknowledged`
+and `unknown`, and it must not be auto-retried: `taskcreate` is not idempotent,
+so retrying the pair creates a second item.
+
+### Two corrections to the earlier contract
+
+1. **`quantity` is not a parameter of `taskcreate`.** The earlier live check
+   showed it silently dropped; the declared signature now explains why. This is
+   settled: quantity cannot be sent, stored or read, and no tool may offer it.
+2. **Item delete and item edit DO exist.** The "Not available" section below is
+   wrong: `taskdelete(["taskId"])` and `taskupdate(["taskId","text","dueDate",
+   "assignee","reminder"])` are both declared. They were absent from the
+   reference TypeScript client, not from the API. Neither has been exercised
+   live, so both are `source-only` at the web-client level until tested — but
+   the claim that no delete endpoint exists is withdrawn, and test-item cleanup
+   no longer necessarily requires the UI.
+
+`taskmark`'s third parameter, `completedDateForTesting`, is not used by this
+project.
 
 ## Open questions
 
