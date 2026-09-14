@@ -1,0 +1,12 @@
+# Example Caddyfile for FamilyWall MCP reverse proxy.
+# Caddy automatically provisions and renews Let's Encrypt certificates
+# for the domain with zero additional configuration.
+#
+# To use:
+# 1. Copy this file: cp Caddyfile.example Caddyfile
+# 2. Replace your-domain.example.com with your actual domain
+# 3. Run with docker-compose.prod.yml
+
+your-domain.example.com {
+	reverse_proxy familywall-mcp:8000
+}

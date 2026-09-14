@@ -1,0 +1,39 @@
+# Production Docker Compose configuration with Caddy reverse proxy.
+# Caddy automatically provisions and renews Let's Encrypt certificates,
+# handles HTTPS termination, and forwards requests to the MCP app via internal DNS.
+
+version: "3.8"
+
+services:
+  familywall-mcp:
+    build: .
+    expose:
+      # Only expose to Caddy via Docker's internal network (not to host).
+      - "8000"
+    env_file: .env
+    volumes:
+      # Persistent SQLite database and OAuth token state
+      - familywall_data:/data
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      # Accept HTTP and HTTPS traffic from the internet
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Caddyfile must exist at ./Caddyfile (gitignored; copy from Caddyfile.example)
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Caddy's internal persistent state: certificates, configuration, etc.
+      # Separate from familywall_data to avoid confusion.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - familywall-mcp
+    restart: unless-stopped
+
+volumes:
+  familywall_data:
+  caddy_data:
+  caddy_config:

@@ -15,7 +15,7 @@ Last updated 2026-09-14 by live write check and transport audit.
 | Structured output | `output_schema` generated from a pydantic return model | Spike output | 2026-09-13 |
 | Streamable HTTP app | `streamable_http_app()` mounts `/mcp` | Route inspection | 2026-09-13 |
 | Protected resource metadata | `/.well-known/oauth-protected-resource/mcp` | Route inspection | 2026-09-13 |
-| Authorization server routes | `/.well-known/oauth-authorization-server`, `/authorize`, `/token`, `/register`, `/revoke` | Route inspection with a provider instance | 2026-09-13 |
+| Authorization server routes | `/.well-known/oauth-authorization-server`, `/authorize`, `/token`, `/register`, `/revoke` | Implemented in `auth/provider.py` backed by `OAuthSqliteStore`; unit-tested | 2026-09-14 |
 | Authenticated subject in handler | `get_access_token().subject` | Spike tool with a fake verifier | 2026-09-13 |
 
 ## Protocol
@@ -30,15 +30,22 @@ Last updated 2026-09-14 by live write check and transport audit.
 
 ## Clients
 
-No client has connected to this server. Every row is outstanding.
+No real client (Claude, ChatGPT, etc.) has connected to this server yet. Every row
+requires a real HTTPS deployment and live connector testing.
 
-| Client | Requirement (documented) | Status |
-| --- | --- | --- |
-| Claude custom connector | HTTPS Streamable HTTP; OAuth with PKCE; DCR supported; callback `https://claude.ai/api/mcp/auth_callback` | **pending** — P6 |
-| Claude — CIMD registration | Preferred by Anthropic; not exercised in the spike | **pending** — P6 |
-| ChatGPT developer mode | HTTPS Streamable HTTP only; OAuth 2.1 mandatory; DCR supported; bare bearer tokens rejected; no localhost | **pending** — P6 |
-| Two distinct users, concurrent | — | **pending** — P5/P6 |
-| Token refresh and reconnect after expiry | — | **pending** — P6 |
+**Implementation notes:** The OAuth provider is implemented and unit-tested with
+static `.env`-configured multi-user support (per [ADR 0002](decisions/0002-simplified-hosted-auth.md)).
+No invitations or account pages exist; users are configured via `FAMILYWALL_USER_<N>_*`
+environment variables. Token refresh, rotation, reuse detection, and revocation are
+implemented. The proof that this works with Claude and ChatGPT remains pending.
+
+| Client | Requirement (documented) | Verified | Date |
+| --- | --- | --- | --- |
+| Claude custom connector | HTTPS Streamable HTTP; OAuth with PKCE; DCR supported; callback `https://claude.ai/api/mcp/auth_callback` | **not verified** — requires real HTTPS domain and live test | — |
+| Claude — CIMD registration | Preferred by Anthropic; DCR is the working assumption | **not verified** — requires real HTTPS domain and live test | — |
+| ChatGPT developer mode | HTTPS Streamable HTTP only; OAuth 2.1 mandatory; DCR supported; bare bearer tokens rejected; no localhost | **not verified** — requires real HTTPS domain and live test | — |
+| Two distinct users, concurrent | MCP logins isolated; no credential cross-contamination | **unit-tested** — provider under ASGI app, not live | 2026-09-14 |
+| Token refresh and reconnect after expiry | Refresh-token rotation, reuse detection, revocation | **unit-tested** — provider under ASGI app, not live | 2026-09-14 |
 
 ## FamilyWall upstream
 

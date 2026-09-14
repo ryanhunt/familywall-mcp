@@ -29,14 +29,49 @@ multi-user invites are not implemented yet — see
 - [AI workflow](docs/agent-workflow.md): shared Claude Code/Codex conventions.
 - [Contributing](CONTRIBUTING.md): workflow and validation commands.
 
+### Local development
+
 Install the locked development environment with `uv sync --frozen --group dev`.
 Run `scripts/check` for lint, format, type, offline-test, build, and secret-scan
 checks. Configure via environment variables (`FAMILYWALL_MODE=stdio`,
 `FAMILYWALL_BASE_URL`, `FAMILYWALL_EMAIL`, `FAMILYWALL_PASSWORD`,
 `FAMILYWALL_LOCAL_SUBJECT`, `FAMILYWALL_ENABLE_WRITES`; see
 [docs/PROGRESS.md](docs/PROGRESS.md#how-to-run-it-locally)), then run
-`uv run familywall-mcp serve` to start the MCP server on stdio. Hosted mode,
-containers/HTTPS and multi-family/multi-user support are not implemented yet.
+`uv run familywall-mcp serve` to start the MCP server on stdio.
+
+### Hosted deployment
+
+To run a multi-user hosted MCP server with OAuth and HTTPS (backed by Caddy and
+Let's Encrypt):
+
+1. **Prerequisites:** A domain pointing at your host, with ports 80 and 443
+   reachable from the internet.
+
+2. **Configure users:** Copy `.env.example` to `.env` and fill in the hosted-mode
+   section with at least one user:
+   ```
+   FAMILYWALL_MODE=hosted
+   FAMILYWALL_PUBLIC_URL=https://your-domain.com
+   FAMILYWALL_AUTH_SECRET_KEY=<random-32+-character-string>
+   FAMILYWALL_USER_1_MCP_USERNAME=alice
+   FAMILYWALL_USER_1_MCP_PASSWORD=<mcp-password>
+   FAMILYWALL_USER_1_FW_EMAIL=alice@familywall.account
+   FAMILYWALL_USER_1_FW_PASSWORD=<familywall-password>
+   FAMILYWALL_ALLOWED_REDIRECT_URI_HOSTS=claude.ai,chatgpt.com
+   ```
+   See `.env.example` for additional users, all variables, and security notes.
+
+3. **Configure Caddy:** Copy `Caddyfile.example` to `Caddyfile` and replace
+   `your-domain.example.com` with your actual domain. Caddy will automatically
+   provision and renew Let's Encrypt certificates.
+
+4. **Deploy:** Run `docker compose -f docker-compose.prod.yml up -d --build`.
+   The MCP server listens internally on port 8000; Caddy handles public HTTPS
+   on port 443.
+
+5. **Add to Claude or ChatGPT:** Navigate to `https://your-domain.com/mcp`,
+   follow the OAuth login prompt with an MCP username and password from `.env`,
+   and authorize the connector. The AI can now call your FamilyWall tools.
 
 Inspired by [ryanhunt/halaxy-mcp](https://github.com/ryanhunt/halaxy-mcp) and based on
 protocol research in [ryanhunt/familywall-api](https://github.com/ryanhunt/familywall-api),

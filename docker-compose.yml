@@ -1,0 +1,20 @@
+# Local development Docker Compose configuration.
+# For production deployments, use docker-compose.prod.yml instead (includes Caddy reverse proxy).
+
+version: "3.8"
+
+services:
+  familywall-mcp:
+    build: .
+    ports:
+      # Bind to loopback only (127.0.0.1) for local testing; reverse proxy (Caddy)
+      # handles external HTTPS in production.
+      - "127.0.0.1:8000:8000"
+    env_file: .env
+    volumes:
+      # Mount a named volume for persistent SQLite database and OAuth state
+      - familywall_data:/data
+    restart: unless-stopped
+
+volumes:
+  familywall_data:

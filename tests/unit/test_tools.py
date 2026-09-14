@@ -9,6 +9,7 @@ import pytest
 from familywall_mcp.config import AppConfig
 from familywall_mcp.familywall.discovery import DiscoveredFamily, FamilyMember
 from familywall_mcp.models import FamilyContext, Principal
+from familywall_mcp.services.principal_context import FixedContextResolver, PrincipalContext
 from familywall_mcp.storage.memory import InMemoryReceiptRepository
 from familywall_mcp.tools.registry import (
     ErrorResponse,
@@ -167,14 +168,16 @@ def create_registry(
         calendar_id="calendar/1",
     )
 
-    registry = ToolRegistry(
-        config=config,
-        session_pool=pool,  # type: ignore
-        principal=principal,
+    context = PrincipalContext(
         family_context=family_context,
         discovered_family=discovered_family,
         authenticated_member_timezone=discovered_family.members[0].timezone or "UTC",
-        calendar_service=FakeCalendarService(),  # type: ignore
+        calendar_service=FakeCalendarService(),  # type: ignore[arg-type]
+    )
+    registry = ToolRegistry(
+        config=config,
+        session_pool=pool,  # type: ignore
+        context_resolver=FixedContextResolver(principal, context),
         receipt_repository=InMemoryReceiptRepository(),
     )
     return registry, pool
@@ -334,11 +337,15 @@ async def test_set_list_item_checked_verifies_and_marks() -> None:
     registry = ToolRegistry(
         config=config,
         session_pool=pool,  # type: ignore
-        principal=principal,
-        family_context=family_context,
-        discovered_family=discovered,
-        authenticated_member_timezone="Australia/Sydney",
-        calendar_service=FakeCalendarService(),  # type: ignore
+        context_resolver=FixedContextResolver(
+            principal,
+            PrincipalContext(
+                family_context=family_context,
+                discovered_family=discovered,
+                authenticated_member_timezone="Australia/Sydney",
+                calendar_service=FakeCalendarService(),  # type: ignore[arg-type]
+            ),
+        ),
         receipt_repository=receipt_repo,
     )
 
@@ -404,11 +411,15 @@ async def test_add_list_item_with_idempotency_uses_receipt_repo() -> None:
     registry = ToolRegistry(
         config=config,
         session_pool=pool,  # type: ignore
-        principal=principal,
-        family_context=family_context,
-        discovered_family=discovered,
-        authenticated_member_timezone="Australia/Sydney",
-        calendar_service=FakeCalendarService(),  # type: ignore
+        context_resolver=FixedContextResolver(
+            principal,
+            PrincipalContext(
+                family_context=family_context,
+                discovered_family=discovered,
+                authenticated_member_timezone="Australia/Sydney",
+                calendar_service=FakeCalendarService(),  # type: ignore[arg-type]
+            ),
+        ),
         receipt_repository=receipt_repo,
     )
 
