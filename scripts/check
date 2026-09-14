@@ -9,6 +9,37 @@ uv run ruff format --check .
 uv run mypy src
 uv run pytest -m 'not live'
 uv build
-uv run detect-secrets scan --baseline .secrets.baseline --all-files \
+
+# `detect-secrets scan --baseline FILE` always rewrites FILE in place (it
+# re-serializes the whole baseline, including a fresh `generated_at`
+# timestamp, even when no findings changed), regardless of stdout
+# redirection. Left alone, that dirties the tree on every single run. Scan
+# into a copy, compare against the pre-scan baseline ignoring only
+# `generated_at`, and always restore the pre-scan file afterwards so the
+# tree never ends up dirty; only fail (after restoring) if the actual
+# findings changed.
+baseline=.secrets.baseline
+baseline_before="$(mktemp)"
+trap 'rm -f "$baseline_before"' EXIT
+cp "$baseline" "$baseline_before"
+uv run detect-secrets scan --baseline "$baseline" --all-files \
   --exclude-files '(^|/)(uv\.lock|\.git/|\.venv/|\.mypy_cache/|\.pytest_cache/|\.ruff_cache/|\.uv-cache/|dist/)' \
   >/dev/null
+if uv run python3 -c "
+import json, sys
+
+def load(path):
+    with open(path) as f:
+        data = json.load(f)
+    data.pop('generated_at', None)
+    return data
+
+sys.exit(0 if load('$baseline_before') == load('$baseline') else 1)
+"; then
+  cp "$baseline_before" "$baseline"
+else
+  cp "$baseline_before" "$baseline"
+  echo "detect-secrets: findings changed; run 'uv run detect-secrets scan --baseline $baseline'," \
+       "review with 'uv run detect-secrets audit $baseline', then commit the updated baseline" >&2
+  exit 1
+fi

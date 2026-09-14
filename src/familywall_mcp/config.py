@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from enum import StrEnum
 from urllib.parse import urlparse
@@ -12,10 +13,46 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, m
 from .errors import ConfigurationError, ErrorInfo
 from .models import Principal
 
+# Hard cap on numbered FAMILYWALL_USER_<N>_* env vars scanned by from_env.
+# This deployment is for a small, operator-configured household, not a
+# general multi-tenant service; a generous-but-bounded cap keeps a typo'd
+# gap-free sequence from scanning indefinitely.
+MAX_HOSTED_USERS = 20
+
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
+
 
 class RuntimeMode(StrEnum):
     STDIO = "stdio"
     HOSTED = "hosted"
+
+
+class HostedUser(BaseModel):
+    """One operator-configured hosted-mode account: an MCP login mapped to
+    that person's own FamilyWall credentials.
+
+    Both credential pairs are supplied directly via environment variables
+    (FAMILYWALL_USER_<N>_*) by the operator for a small, trusted group of
+    invited users. There is no self-service signup, invitation flow, or
+    encrypted-at-rest credential database; see
+    docs/decisions/0002-simplified-hosted-auth.md for the rationale.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    mcp_username: str = Field(min_length=1, max_length=100)
+    mcp_password: SecretStr = Field(repr=False)
+    familywall_email: str = Field(min_length=1, max_length=320)
+    familywall_password: SecretStr = Field(repr=False)
+
+    @field_validator("mcp_username")
+    @classmethod
+    def mcp_username_is_safe(cls, value: str) -> str:
+        if not _USERNAME_RE.match(value):
+            raise ValueError(
+                "mcp_username must be 1-100 characters of letters, digits, '.', '_' or '-'"
+            )
+        return value
 
 
 class AppConfig(BaseModel):
@@ -25,6 +62,7 @@ class AppConfig(BaseModel):
 
     mode: RuntimeMode = RuntimeMode.STDIO
     public_url: str | None = None
+    port: int = 8000
     auth_secret_key: SecretStr | None = Field(default=None, repr=False)
     local_subject: str | None = None
     database_path: str = "data/familywall.sqlite3"
@@ -32,6 +70,8 @@ class AppConfig(BaseModel):
     familywall_email: str | None = None
     familywall_password: SecretStr | None = Field(default=None, repr=False)
     enable_writes: bool = False
+    hosted_users: tuple[HostedUser, ...] = ()
+    allowed_redirect_uri_hosts: frozenset[str] = frozenset()
 
     @field_validator("public_url")
     @classmethod
@@ -103,6 +143,26 @@ class AppConfig(BaseModel):
                         "Use a randomly generated key of at least 32 characters.",
                     )
                 )
+            if not self.hosted_users:
+                raise ConfigurationError(
+                    ErrorInfo(
+                        "hosted_users_missing",
+                        "Hosted mode requires at least one configured user.",
+                        "Set FAMILYWALL_USER_1_MCP_USERNAME and related variables.",
+                    )
+                )
+            seen: set[str] = set()
+            for user in self.hosted_users:
+                normalized = user.mcp_username.lower()
+                if normalized in seen:
+                    raise ConfigurationError(
+                        ErrorInfo(
+                            "hosted_users_duplicate_username",
+                            "Two configured hosted users share the same MCP username.",
+                            "Give each FAMILYWALL_USER_<N>_MCP_USERNAME a unique value.",
+                        )
+                    )
+                seen.add(normalized)
         elif self.local_subject is None or not self.local_subject.strip():
             raise ConfigurationError(
                 ErrorInfo(
@@ -120,6 +180,7 @@ class AppConfig(BaseModel):
         raw: dict[str, object] = {
             "mode": values.get("FAMILYWALL_MODE", RuntimeMode.STDIO),
             "public_url": values.get("FAMILYWALL_PUBLIC_URL"),
+            "port": values.get("FAMILYWALL_PORT", "8000"),
             "auth_secret_key": values.get("FAMILYWALL_AUTH_SECRET_KEY"),
             "local_subject": values.get("FAMILYWALL_LOCAL_SUBJECT"),
             "database_path": values.get("FAMILYWALL_DATABASE_PATH", "data/familywall.sqlite3"),
@@ -129,6 +190,8 @@ class AppConfig(BaseModel):
             "familywall_email": values.get("FAMILYWALL_EMAIL"),
             "familywall_password": values.get("FAMILYWALL_PASSWORD"),
             "enable_writes": values.get("FAMILYWALL_ENABLE_WRITES", "false"),
+            "hosted_users": _parse_hosted_users(values),
+            "allowed_redirect_uri_hosts": _parse_allowed_redirect_uri_hosts(values),
         }
         try:
             return cls.model_validate(raw)
@@ -168,3 +231,49 @@ class AppConfig(BaseModel):
         if self.mode is not RuntimeMode.STDIO or self.local_subject is None:
             raise ConfigurationError()
         return Principal(subject=self.local_subject)
+
+    def find_hosted_user(self, mcp_username: str) -> HostedUser | None:
+        """Return the configured hosted user matching ``mcp_username`` (case-insensitive)."""
+        normalized = mcp_username.lower()
+        for user in self.hosted_users:
+            if user.mcp_username.lower() == normalized:
+                return user
+        return None
+
+
+def _parse_hosted_users(values: Mapping[str, str]) -> tuple[dict[str, object], ...]:
+    """Parse ``FAMILYWALL_USER_<N>_*`` variables for N = 1.. up to MAX_HOSTED_USERS.
+
+    Numbering must be contiguous starting at 1; the scan stops at the first
+    gap. A partially-configured slot (some but not all four fields set)
+    raises ConfigurationError rather than silently skipping it.
+    """
+    users: list[dict[str, object]] = []
+    for index in range(1, MAX_HOSTED_USERS + 1):
+        prefix = f"FAMILYWALL_USER_{index}_"
+        fields: dict[str, object] = {
+            "mcp_username": values.get(f"{prefix}MCP_USERNAME"),
+            "mcp_password": values.get(f"{prefix}MCP_PASSWORD"),
+            "familywall_email": values.get(f"{prefix}FW_EMAIL"),
+            "familywall_password": values.get(f"{prefix}FW_PASSWORD"),
+        }
+        present = [name for name, value in fields.items() if value]
+        if not present:
+            break
+        if len(present) != len(fields):
+            missing = sorted(set(fields) - set(present))
+            raise ConfigurationError(
+                ErrorInfo(
+                    "hosted_user_incomplete",
+                    f"{prefix}* is missing required fields: {', '.join(missing)}.",
+                    f"Set all of {prefix}MCP_USERNAME, {prefix}MCP_PASSWORD, "
+                    f"{prefix}FW_EMAIL, {prefix}FW_PASSWORD.",
+                )
+            )
+        users.append(fields)
+    return tuple(users)
+
+
+def _parse_allowed_redirect_uri_hosts(values: Mapping[str, str]) -> frozenset[str]:
+    raw = values.get("FAMILYWALL_ALLOWED_REDIRECT_URI_HOSTS", "")
+    return frozenset(host.strip() for host in raw.split(",") if host.strip())

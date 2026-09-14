@@ -44,5 +44,8 @@ secrets/
 htmlcov/
 .claude/settings.local.json
 
+# Caddy reverse proxy configuration (production domain/certificate secrets)
+Caddyfile
+
 # Local operating-system metadata
 .DS_Store

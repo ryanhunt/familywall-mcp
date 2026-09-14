@@ -1,8 +1,17 @@
 # Proposed architecture
 
-Status: design, not implemented. Recorded 2026-09-13. Product decisions: Python;
-a few invited family members; separate logins; entirely self-hosted authentication;
-shopping lists and a reliable weekly calendar first. See [implementation plan](implementation-plan.md).
+Status: design, partially implemented. Recorded 2026-09-13; substantially revised
+2026-09-14. See [ADR 0002](decisions/0002-simplified-hosted-auth.md): the invitation
+flow, account pages, per-user encrypted credential database, and password recovery
+**were not built**. The actual P5/P6 implementation uses static `.env`-configured
+multi-user support instead. See [implementation plan](implementation-plan.md).
+
+**Important:** The sections below (User experience, System boundaries, Technology
+decisions, Proposed package layout, Identity and storage contract, OAuth and
+account-page contract) document what was *originally* designed, not what was
+implemented. Refer to [ADR 0002](decisions/0002-simplified-hosted-auth.md) for the
+deliberate reduction in scope and see [PROGRESS.md](PROGRESS.md) for the status of
+what actually exists.
 
 ## User experience
 

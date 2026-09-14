@@ -5,13 +5,14 @@ outputs of the last completed row, and continue at the first row that is not
 `done`. See [implementation plan](implementation-plan.md) and
 [task cards](tasks.md).
 
-Current branch: `claude/p2-live-probe-and-client`.
+Current branch: `claude/hosted-oauth-multiuser`.
 
 ## Delivery target for this pass
 
-Local **stdio** MCP server the user can run and test against their own
-FamilyWall account. Hosted OAuth (P5), containers and HTTPS (P6) are explicitly
-deferred until the stdio server works end to end.
+Local **stdio** MCP server plus hosted multi-user OAuth (P5) and Docker/HTTPS (P6).
+The stdio server is live-verified (2026-09-14). Hosted mode is complete and tested
+against the ASGI app directly but not yet verified against a real Claude/ChatGPT
+custom connector over HTTPS; see compatibility table below.
 
 ## Phase status
 
@@ -31,8 +32,8 @@ deferred until the stdio server works end to end.
 | — | **Live stdio check, read-only** | verified 2026-09-14 | **done** |
 | P3 | **Live write check (create, move, delete, check)** | `taskcreate`/`taskmove`/`taskdelete`/`set_list_item_checked` all live-verified; see contracts/familywall.md | **done 2026-09-14** |
 | — | stdio server entry point and local smoke test | `server.py`, `cli.py` | not started |
-| P5 | Storage, invites, OAuth | — | deferred until stdio works |
-| P6 | Containers and HTTPS | — | deferred until stdio works |
+| P5 | OAuth + static multi-user config | `auth/provider.py`, `OAuthSqliteStore`, `FAMILYWALL_USER_<N>_*` env vars | **done**: `config.py`, `auth/provider.py` implemented and unit-tested; live-verified via ASGI tests with fake credentials |
+| P6 | Containers and HTTPS | `Dockerfile`, `docker-compose.prod.yml`, `Caddyfile.example` | **done**: `uv sync --frozen --no-dev` (the Dockerfile's install step) and the resulting `familywall-mcp serve` process were run directly and answer `/health`; `docker build`/`docker compose` itself was not run (no Docker available in this environment) — verify a real image build before relying on it in production; not yet verified against real Claude/ChatGPT over HTTPS |
 | P7 | Acceptance and release | — | not started |
 
 ## What 02P settled, and what it changed

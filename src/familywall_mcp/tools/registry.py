@@ -11,11 +11,10 @@ from mcp.types import ToolAnnotations
 
 from familywall_mcp.config import AppConfig
 from familywall_mcp.errors import FamilyWallError
-from familywall_mcp.familywall.discovery import DiscoveredFamily
 from familywall_mcp.interfaces import ReceiptRepository
-from familywall_mcp.models import DomainModel, FamilyContext, Principal
-from familywall_mcp.services.calendar import CalendarService
+from familywall_mcp.models import DomainModel
 from familywall_mcp.services.lists import ListService
+from familywall_mcp.services.principal_context import ContextResolver
 from familywall_mcp.services.session import SessionPool
 from familywall_mcp.services.transport import read_transport, write_transport
 
@@ -114,11 +113,7 @@ class ToolRegistry:
         self,
         config: AppConfig,
         session_pool: SessionPool,
-        principal: Principal,
-        family_context: FamilyContext,
-        discovered_family: DiscoveredFamily,
-        authenticated_member_timezone: str,
-        calendar_service: CalendarService,
+        context_resolver: ContextResolver,
         receipt_repository: ReceiptRepository,
     ) -> None:
         """Initialize the tool registry.
@@ -126,20 +121,17 @@ class ToolRegistry:
         Args:
             config: Application configuration.
             session_pool: The session pool for making API calls.
-            principal: The authenticated principal.
-            family_context: The family context from discovery.
-            discovered_family: The complete discovered family with members and names.
-            authenticated_member_timezone: The authenticated member's timezone for fallback.
-            calendar_service: The calendar service.
+            context_resolver: Resolves the current principal and its discovery
+                context for each tool call. In stdio mode this is a fixed
+                pair built once at startup; in hosted mode it reads the
+                per-request access token, so one process can safely serve
+                several concurrently-logged-in users without leaking one
+                user's family/list data into another's tool call.
             receipt_repository: The receipt repository for idempotency tracking.
         """
         self._config = config
         self._session_pool = session_pool
-        self._principal = principal
-        self._family_context = family_context
-        self._discovered_family = discovered_family
-        self._authenticated_member_timezone = authenticated_member_timezone
-        self._calendar_service = calendar_service
+        self._context_resolver = context_resolver
         self._receipt_repository = receipt_repository
 
     def register_tools(self, server: MCPServer) -> None:
@@ -198,10 +190,11 @@ class ToolRegistry:
             ConnectionStatusResponse with family details and write status, or an error.
         """
         try:
+            _principal, ctx = await self._context_resolver.resolve()
             return ConnectionStatusResponse(
-                family_name=self._discovered_family.name,
-                member_count=len(self._discovered_family.members),
-                authenticated_member_timezone=self._authenticated_member_timezone,
+                family_name=ctx.discovered_family.name,
+                member_count=len(ctx.discovered_family.members),
+                authenticated_member_timezone=ctx.authenticated_member_timezone,
                 writes_enabled=self._config.enable_writes,
             )
         except FamilyWallError as exc:
@@ -214,9 +207,10 @@ class ToolRegistry:
     async def _list_shopping_lists(self) -> ListShoppingListsResponse | ErrorResponse:
         """List all shopping lists."""
         try:
-            transport = read_transport(self._session_pool, self._principal)
+            principal, ctx = await self._context_resolver.resolve()
+            transport = read_transport(self._session_pool, principal)
             service = ListService(transport)
-            lists = await service.list_accessible_lists(self._principal)
+            lists = await service.list_accessible_lists(principal)
 
             summaries = tuple(
                 ShoppingListSummary(
@@ -229,7 +223,7 @@ class ToolRegistry:
                 for lst in lists
             )
             return ListShoppingListsResponse(
-                family_name=self._discovered_family.name,
+                family_name=ctx.discovered_family.name,
                 lists=summaries,
             )
         except FamilyWallError as exc:
@@ -242,9 +236,10 @@ class ToolRegistry:
     async def _get_list_items(self, list_id: str) -> GetListItemsResponse | ErrorResponse:
         """Get items in a list."""
         try:
-            transport = read_transport(self._session_pool, self._principal)
+            principal, ctx = await self._context_resolver.resolve()
+            transport = read_transport(self._session_pool, principal)
             service = ListService(transport)
-            items = await service.get_list_items(self._principal, list_id)
+            items = await service.get_list_items(principal, list_id)
 
             item_responses = tuple(
                 ListItemResponse(
@@ -256,7 +251,7 @@ class ToolRegistry:
                 for item in items
             )
             return GetListItemsResponse(
-                family_name=self._discovered_family.name,
+                family_name=ctx.discovered_family.name,
                 list_id=list_id,
                 items=item_responses,
             )
@@ -275,21 +270,22 @@ class ToolRegistry:
     ) -> GetWeekOverviewResponse | ErrorResponse:
         """Get a weekly calendar overview."""
         try:
+            _principal, ctx = await self._context_resolver.resolve()
             # Parse reference_date or use today
             ref_date = date.fromisoformat(reference_date) if reference_date else date.today()
 
             # Use provided timezone or fall back to authenticated member's timezone
-            resolved_timezone = timezone or self._authenticated_member_timezone
+            resolved_timezone = timezone or ctx.authenticated_member_timezone
 
-            overview = await self._calendar_service.get_week_overview(
+            overview = await ctx.calendar_service.get_week_overview(
                 reference_date=ref_date,
                 timezone=resolved_timezone,
-                calendar_id=self._family_context.calendar_id,
+                calendar_id=ctx.family_context.calendar_id,
                 week_starts_on=week_starts_on,
             )
 
             return GetWeekOverviewResponse(
-                family_name=self._discovered_family.name,
+                family_name=ctx.discovered_family.name,
                 resolved_timezone=overview.timezone,
                 week_start=overview.range_start.isoformat(),
                 week_end=overview.range_end.isoformat(),
@@ -349,11 +345,12 @@ class ToolRegistry:
             )
 
         try:
-            transport = write_transport(self._session_pool, self._principal)
+            principal, ctx = await self._context_resolver.resolve()
+            transport = write_transport(self._session_pool, principal)
             service = ListService(transport)
 
             # Select list
-            selection = await service.select_list(self._principal, explicit_list_id=list_id)
+            selection = await service.select_list(principal, explicit_list_id=list_id)
             if selection.resolved is None:
                 # Ambiguous or no eligible list; return candidates without writing
                 return ErrorResponse(
@@ -367,16 +364,16 @@ class ToolRegistry:
 
             # Add the item
             result, _items = await service.add_item(
-                self._principal,
+                principal,
                 selection.resolved.list_id,
                 text,
                 operation_id,
                 self._receipt_repository,
-                self._family_context.family_id,
+                ctx.family_context.family_id,
             )
 
             return AddListItemResponse(
-                family_name=self._discovered_family.name,
+                family_name=ctx.discovered_family.name,
                 outcome=result.outcome.value,
                 item_id=result.item_id,
                 actual_list_id=result.actual_list_id,
@@ -416,7 +413,8 @@ class ToolRegistry:
             )
 
         try:
-            transport = write_transport(self._session_pool, self._principal)
+            principal, ctx = await self._context_resolver.resolve()
+            transport = write_transport(self._session_pool, principal)
             service = ListService(transport)
 
             # Generate operation ID if not provided
@@ -424,16 +422,16 @@ class ToolRegistry:
 
             # Mark the item
             result = await service.set_item_checked(
-                self._principal,
+                principal,
                 item_id,
                 checked,
                 operation_id,
                 self._receipt_repository,
-                self._family_context.family_id,
+                ctx.family_context.family_id,
             )
 
             return SetListItemCheckedResponse(
-                family_name=self._discovered_family.name,
+                family_name=ctx.discovered_family.name,
                 outcome=result.outcome.value,
             )
         except FamilyWallError as exc:
