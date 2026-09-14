@@ -29,6 +29,9 @@ class AppConfig(BaseModel):
     local_subject: str | None = None
     database_path: str = "data/familywall.sqlite3"
     familywall_base_url: str = "https://familywall.example.invalid"
+    familywall_email: str | None = None
+    familywall_password: SecretStr | None = Field(default=None, repr=False)
+    enable_writes: bool = False
 
     @field_validator("public_url")
     @classmethod
@@ -39,6 +42,38 @@ class AppConfig(BaseModel):
         if parsed.scheme != "https" or not parsed.netloc:
             raise ValueError("public_url must be an absolute HTTPS URL")
         return value.rstrip("/")
+
+    @field_validator("enable_writes", mode="before")
+    @classmethod
+    def parse_enable_writes(cls, value: object) -> bool:
+        """Parse enable_writes from string environment variable.
+
+        Only the exact strings 'true' and 'false' (case-insensitive) are valid.
+        Anything else — including '1', 'yes', 'TRUE ' (with whitespace), empty
+        string, or 'maybe' — raises ValueError.
+
+        Args:
+            value: The value from the environment or test (already a bool if set
+                programmatically, or a string if from environment).
+
+        Returns:
+            The parsed boolean value.
+
+        Raises:
+            ValueError: If the string is not exactly 'true' or 'false'.
+        """
+        if isinstance(value, bool):
+            return value
+        if not isinstance(value, str):
+            raise ValueError(f"enable_writes must be a string or bool, not {type(value).__name__}")
+        lower = value.lower()
+        if lower == "true":
+            return True
+        if lower == "false":
+            return False
+        raise ValueError(
+            f"enable_writes must be exactly 'true' or 'false' (case-insensitive); got {value!r}"
+        )
 
     @model_validator(mode="after")
     def validate_mode(self) -> AppConfig:
@@ -91,6 +126,9 @@ class AppConfig(BaseModel):
             "familywall_base_url": values.get(
                 "FAMILYWALL_BASE_URL", "https://familywall.example.invalid"
             ),
+            "familywall_email": values.get("FAMILYWALL_EMAIL"),
+            "familywall_password": values.get("FAMILYWALL_PASSWORD"),
+            "enable_writes": values.get("FAMILYWALL_ENABLE_WRITES", "false"),
         }
         try:
             return cls.model_validate(raw)
@@ -98,6 +136,33 @@ class AppConfig(BaseModel):
             raise
         except ValueError as exc:
             raise ConfigurationError() from exc
+
+    def require_familywall_credentials(self) -> tuple[str, str]:
+        """Return the FamilyWall email and password, or raise ConfigurationError.
+
+        Returns:
+            A tuple of (email, password).
+
+        Raises:
+            ConfigurationError: If either email or password is missing.
+        """
+        if not self.familywall_email:
+            raise ConfigurationError(
+                ErrorInfo(
+                    "familywall_email_missing",
+                    "FAMILYWALL_EMAIL is required.",
+                    "Set FAMILYWALL_EMAIL and try again.",
+                )
+            )
+        if not self.familywall_password:
+            raise ConfigurationError(
+                ErrorInfo(
+                    "familywall_password_missing",
+                    "FAMILYWALL_PASSWORD is required.",
+                    "Set FAMILYWALL_PASSWORD and try again.",
+                )
+            )
+        return self.familywall_email, self.familywall_password.get_secret_value()
 
     def local_principal(self) -> Principal:
         if self.mode is not RuntimeMode.STDIO or self.local_subject is None:
