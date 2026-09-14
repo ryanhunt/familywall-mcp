@@ -3,7 +3,7 @@
 What has actually been verified, and by what means. Keep this table honest: a
 row moves to a positive result only when the stated check was executed.
 
-Last updated 2026-09-13 by task 02P (read-only live probe).
+Last updated 2026-09-14 by live write check and transport audit.
 
 ## Server-side
 
@@ -52,6 +52,7 @@ write endpoint was called. Findings are recorded in
 | Login handshake against live service | **pass** — 2026-09-13; `JSESSIONID` cookie plus a mandatory `tokencsrf` header; `webset`/`webget` unnecessary |
 | Login failure is distinguishable | **pass** — 2026-09-13; `a00.ex.ex` / `FiZClassId 3` / `bad password` |
 | Expired-session presentation | **pass** — 2026-09-13; HTTP 200 with `a00.un.un` / `501` / `NOAUTHENT`, not 401 and not HTML |
+| Transient load balancer errors (502) | **pass** — 2026-09-14; intermittent HTTP 502 Bad Gateway with non-JSON body; recoverable with retry |
 | Family/calendar discovery for a real account | **pass** — 2026-09-13; single family object, `family_id` + `metaId` + `members[]` with IANA `timeZone` |
 | Derived `calendar/{family_id}` accepted | **pass with a caveat** — 2026-09-13; it is the server's own calendar ID, but the request parameter is **ignored** and does not scope or filter anything |
 | List read shapes | **pass** — 2026-09-13; bare arrays, `taskList/<id>` and `task/<id>` identities, types `SHOPPING_LIST`/`TODOS`/`OTHER` |
@@ -61,6 +62,13 @@ write endpoint was called. Findings are recorded in
 | Calendar boundary semantics | **pass** — 2026-09-13; half-open overlap, `start < to && end > from` |
 | Multi-day all-day event | **pending** — needs a deliberately created test event |
 | Multi-family account discovery | **pending** — the probe account has one family |
-| Shopping add/check/uncheck round trip | **pending** — P3, a write, needs a disposable test list |
-| `taskcreate` / `taskmark` response shapes | **pending** — P3; both are writes and were excluded from the read-only probe |
+| `taskcreate` response shape | **pass** — 2026-09-14; returns full task object with `taskListId` showing actual destination |
+| `taskcreate` ignores list identifier | **pass** — 2026-09-14; confirmed, item lands in default list only |
+| `taskmove` endpoint exists and works | **pass** — 2026-09-14; moves item to target list; create-then-move flow verified |
+| Create-then-move flow (add to chosen list) | **pass** — 2026-09-14; `taskcreate` then `taskmove` places item in target list |
+| Replay protection via idempotency key | **pass** — 2026-09-14; same idempotency key produces no duplicate (confirmed by re-read) |
+| `set_list_item_checked` true and false | **pass** — 2026-09-14; both directions work; explicit false is honoured |
+| `confirmed` outcome fields (null for misfiled) | **pass** — 2026-09-14; `actual_list_id` and `requested_list_id` null when outcome is `confirmed` |
+| `taskdelete` endpoint exists and works | **pass** — 2026-09-14; deletes items immediately; 14 items tested across two runs |
+| `taskmark` response shape | **pending** — 2026-09-14; effect verified by readback, response shape still unobserved |
 | Known test week matches the FamilyWall UI | **pending** — P4 |

@@ -29,7 +29,7 @@ deferred until the stdio server works end to end.
 | P4 | 04B weekly overview service | `services/calendar.py` | **done**: `3effb9a` |
 | — | 05 adapter, MCP tools, stdio server | `services/transport.py`, `tools/`, `server.py` | **done**: `69a0951` |
 | — | **Live stdio check, read-only** | verified 2026-09-14 | **done** |
-| P3 | Live write check (`taskcreate`/`taskmark`) | — | **blocked: needs the user's go-ahead and a disposable list** |
+| P3 | **Live write check (create, move, delete, check)** | `taskcreate`/`taskmove`/`taskdelete`/`set_list_item_checked` all live-verified; see contracts/familywall.md | **done 2026-09-14** |
 | — | stdio server entry point and local smoke test | `server.py`, `cli.py` | not started |
 | P5 | Storage, invites, OAuth | — | deferred until stdio works |
 | P6 | Containers and HTTPS | — | deferred until stdio works |
@@ -118,10 +118,10 @@ reached.
 
 Recorded so they are not quietly dropped:
 
-- `taskcreate` and `taskmark` response shapes — both are writes and 02P was
-  read-only. Answered by a controlled P3 live add/check/uncheck in a disposable
-  test list, with the user's explicit go-ahead.
-- Whether `quantity` is writable at all.
+- **`taskmark` response shape** — its *effect* is live-verified (2026-09-14:
+  check and uncheck both took effect, confirmed by readback, with an explicit
+  `false` honoured), but its returned payload was never inspected. Low value to
+  close: the service re-reads the list to confirm state either way.
 - Multi-day all-day encoding — needs a deliberately created test event.
 - Multi-family discovery shape — the probe account has one family, so the
   single-family refusal must fail closed on anything unexpected.

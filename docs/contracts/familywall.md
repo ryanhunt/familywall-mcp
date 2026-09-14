@@ -63,7 +63,7 @@ source-derived statements they contradict.
 | Send `JSESSIONID` as the `tokencsrf` header | A `tokencsrf` header is **mandatory**; login returns its own `tokenCsrf` value, which is what the port sends |
 | List types are `SHOPPING` / `TODO` / `OTHER` | Read responses use `SHOPPING_LIST` / `TODOS` / `OTHER` |
 | Items carry a `quantity` field | No quantity-like key appears on any read item across four lists (85 items). Treat quantity as unproven |
-| A browser `User-Agent` is required | **Withdrawn.** An authenticated call succeeds with no `User-Agent`, with the httpx default, and with a browser string. The earlier `502` was a missing `tokencsrf`, misattributed |
+| A browser `User-Agent` is required | **Withdrawn.** An authenticated call succeeds with no `User-Agent`, with the httpx default, and with a browser string. The earlier `502` in the first probe was transient load-balancer flakiness, not a protocol error |
 
 ### Authentication — settled
 
@@ -102,6 +102,17 @@ An **expired or invalid session presents as HTTP 200 JSON**, not 401 and not an
 HTML login page: `a00.un.un` / `501` / `"Api <endpoint> is not allowed by ruleset
 NOAUTHENT"`. The HTML-body failure mode was not observed; keep the branch, but the
 `NOAUTHENT` envelope is the reauthentication trigger the client must detect.
+
+### Transient upstream failures — load balancer
+
+Observed independently twice on 2026-09-14: upstream returns **HTTP 502 Bad Gateway
+with a non-JSON body** (plain HTML error page). This is transient infrastructure
+flakiness at the API's load balancer, not an application error, and retrying
+seconds later succeeds both times. A client must treat both non-2xx status and
+non-JSON body as real, recurring conditions and handle them as transport errors,
+not as protocol violations. Do not silently retry writes on 502; they may be
+partially delivered and replay protection relies on the receipt state machine.
+Read operations may be retried; write operations must not.
 
 ### Discovery — settled
 
@@ -432,10 +443,17 @@ quantity-like key at all**, matching the read-side finding of no quantity across
 unreadable. **No tool may advertise quantity**; passing one must either be
 refused or reported as not stored.
 
-### `taskmark` — still unanswered
+### `taskmark` — effect verified, response shape still unobserved
 
-Not exercised. The check could not reach it, because no item could be created in
-the target list and the rules forbade marking items the run did not create.
+Superseded by the 2026-09-14 live write check. `taskmark` **was** exercised once
+the create-then-move flow worked: checking an item and then unchecking it both
+took effect, confirmed by reading the list back each time, and an explicit
+`false` was honoured rather than treated as a no-op.
+
+Its **returned payload was never inspected**, so the response shape remains
+unknown. That is not a gap worth closing: the service must re-read the list to
+confirm state regardless, because the reference client discards this response and
+no acknowledgement from it could be trusted on its own.
 
 ## Endpoint signatures from the web client — 2026-09-14, `live-verified`
 
@@ -516,16 +534,19 @@ Answered by the 02P probe on 2026-09-13, now `live-verified`:
 Still `pending-live`:
 
 1. ~~What does `taskcreate` return?~~ Answered 2026-09-14: a full task object,
-   including the `taskListId` it actually used. **What does `taskmark` return?**
-   Still unanswered.
+   including the `taskListId` it actually used.
 2. ~~Is `quantity` writable and readable?~~ Answered 2026-09-14: it is silently
    dropped. Not writable, not readable.
-3. **How does one create an item in a chosen list?** No known mechanism. This is
-   now the project's top blocker and needs fresh discovery against the real web
-   app, not the reference client.
-3. **What does discovery return for an account in more than one family?** The
+3. ~~How does one create an item in a chosen list?~~ Answered 2026-09-14:
+   `taskcreate` followed by `taskmove`. Both endpoints live-verified; two-step
+   write is not atomic and must be represented as a distinct outcome.
+4. **What does `taskmark` return?** Its effect is live-verified (2026-09-14:
+   check and uncheck both took effect, confirmed by readback), but its returned
+   payload was never inspected. Low value to close, because the service re-reads
+   the list to confirm state regardless.
+5. **What does discovery return for an account in more than one family?** The
    probe account has one. `a00.r.r` is an object, so the multi-family shape is
    unknown. The single-family rule stands and must fail closed on anything
    unexpected.
-4. **Does the session's family ever change, and can it be selected?** No
+6. **Does the session's family ever change, and can it be selected?** No
    selector was found and none was tested.
