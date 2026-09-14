@@ -6,18 +6,21 @@ same policy.
 
 ## Repository context
 
-- This repository is the foundation for a Python async client and MCP server
-  that will port the useful FamilyWall API surface from the sibling
-  `familywall-api` TypeScript project.
+- This repository holds a Python async client and MCP server that ports the
+  useful FamilyWall API surface from the sibling `familywall-api` TypeScript
+  project. The local **stdio** server is implemented and live-verified against
+  a real FamilyWall account: see [docs/PROGRESS.md](docs/PROGRESS.md) for the
+  phase table and current status.
 - The first hosted version is intended for a small group of invited family
   members. Each person will have their own login, with a self-hosted OAuth
-  identity mapped to that person's FamilyWall credentials.
+  identity mapped to that person's FamilyWall credentials. Hosted OAuth,
+  containers/HTTPS and multi-user invites are not implemented yet.
 - `halaxy-mcp` is a local design reference for a small Python MCP server and
   its operational documentation. Do not copy its domain assumptions or
   sensitive practice-management guidance into this project.
-- The current repository is documentation-only aside from `LICENSE` (`README.md`
-  is documentation). Do not describe the Python client, MCP tools, OAuth flow, or
-  validation commands as implemented until the corresponding foundation lands.
+- Do not describe hosted OAuth, containers/HTTPS, or multi-family/multi-user
+  support as implemented until the corresponding phase lands — check
+  `docs/PROGRESS.md`'s phase table rather than assuming.
 
 ## Working agreement
 
@@ -40,11 +43,12 @@ same policy.
    user. Ask only when a missing choice would materially change the requested
    result or an external action requires new authority.
 6. For a change that affects runtime behaviour, add or update meaningful tests
-   and run the project-defined checks. Phase 1 now provides `uv sync --frozen
-   --group dev`, `uv run ruff check .`, `uv run ruff format --check .`,
-   `uv run mypy src`, `uv run pytest -m 'not live'`, `uv build`, and
-   `scripts/check`. Live tests remain opt-in and no FamilyWall tools, OAuth
-   provider, or upstream endpoint behavior is implemented yet.
+   and run the project-defined checks: `uv sync --frozen --group dev`,
+   `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy src`,
+   `uv run pytest -m 'not live'`, `uv build`, and `scripts/check`. Live tests
+   remain opt-in. The six MCP tools (list and calendar read/write) are
+   implemented and live-verified against a real FamilyWall account; the OAuth
+   provider and hosted mode are not.
 
 ## Security and data handling
 
