@@ -161,7 +161,30 @@ live HTTPS deployment.** Treat it as ready to try, not as a proven integration.
   the internet (Caddy needs both to provision Let's Encrypt certificates).
 - Docker and Docker Compose.
 
-### 2. Configure users and secrets
+### 2. Get the code
+
+Clone the repository onto the host that will run the containers:
+
+```bash
+git clone https://github.com/ryanhunt/familywall-mcp.git
+cd familywall-mcp
+```
+
+If you already have a clone from an earlier install, update it to the latest
+`main` before redeploying:
+
+```bash
+git checkout main
+git fetch origin
+git merge origin/main
+```
+
+(`git merge origin/main` after a `fetch` is equivalent to `git pull` while
+being explicit that it's a fast-forward/merge sync, not a rebase — if you have
+local edits to tracked files like `Caddyfile` or `.env`, commit or stash them
+first so the merge doesn't conflict.)
+
+### 3. Configure users and secrets
 
 Copy `.env.example` to `.env` and fill in the hosted-mode section with at
 least one user:
@@ -187,7 +210,7 @@ variable and its constraints, and generate the secret key with something like:
 openssl rand -base64 32
 ```
 
-### 3. Configure Caddy
+### 4. Configure Caddy
 
 Copy `Caddyfile.example` to `Caddyfile` and replace the placeholder domain
 with your own:
@@ -205,7 +228,7 @@ your-domain.example.com {
 Caddy automatically provisions and renews a Let's Encrypt certificate for
 that domain — no manual certificate management.
 
-### 4. Deploy
+### 5. Deploy
 
 ```bash
 docker compose -f docker-compose.prod.yml up -d --build
@@ -229,7 +252,7 @@ Check it's up:
 curl https://your-domain.com/health
 ```
 
-### 5. Add it to Claude or ChatGPT
+### 6. Add it to Claude or ChatGPT
 
 In Claude or ChatGPT's custom-connector / MCP settings, add
 `https://your-domain.com/mcp`. The client will redirect to this server's
