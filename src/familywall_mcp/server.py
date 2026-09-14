@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 
 import httpx
 from mcp.server import MCPServer
@@ -16,7 +16,7 @@ from familywall_mcp.models import Principal
 from familywall_mcp.services.calendar import CalendarService
 from familywall_mcp.services.session import SessionPool
 from familywall_mcp.services.transport import read_transport
-from familywall_mcp.storage.memory import InMemoryReceiptRepository
+from familywall_mcp.storage.sqlite import SqliteReceiptRepository
 from familywall_mcp.tools.registry import ToolRegistry
 
 
@@ -24,8 +24,8 @@ class SimpleClock:
     """Simple clock for SessionPool."""
 
     def now(self) -> datetime:
-        """Return the current datetime."""
-        return datetime.now()
+        """Return the current UTC datetime as timezone-aware."""
+        return datetime.now(UTC)
 
 
 async def run_server() -> int:
@@ -37,6 +37,7 @@ async def run_server() -> int:
     config = None
     http_client = None
     session_pool = None
+    receipt_repository = None
 
     try:
         # Load configuration once
@@ -100,7 +101,10 @@ async def run_server() -> int:
         calendar_service = CalendarService(read_xport)
 
         # Create receipt repository for the entire server lifetime
-        receipt_repository = InMemoryReceiptRepository()
+        clock = SimpleClock()
+        receipt_repository = SqliteReceiptRepository(config.database_path, clock=clock)
+        await receipt_repository.initialise()
+        await receipt_repository.purge_expired()
 
         # Create tool registry with real discovered context
         registry = ToolRegistry(
@@ -130,6 +134,11 @@ async def run_server() -> int:
         return 1
     finally:
         # Clean up resources
+        try:
+            if receipt_repository is not None:
+                await receipt_repository.aclose()
+        except Exception:
+            pass
         try:
             if session_pool is not None:
                 await session_pool.aclose()
