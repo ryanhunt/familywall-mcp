@@ -273,8 +273,8 @@ class TestListServiceMutation:
 
         assert result.outcome == WriteOutcome.CONFIRMED
         assert result.item_id == "task/123"
-        assert result.actual_list_id == "taskList/default"
-        assert result.requested_list_id == "taskList/1"
+        assert result.actual_list_id is None
+        assert result.requested_list_id is None
         assert len(items) == 1
         assert items[0].text == "bread"
         # Exactly three requests sent: taskcreate, taskmove, tasklist
@@ -313,6 +313,8 @@ class TestListServiceMutation:
 
         assert result.outcome == WriteOutcome.ACKNOWLEDGED
         assert result.item_id == "task/123"
+        assert result.actual_list_id is None
+        assert result.requested_list_id is None
         assert len(items) == 0
         # Exactly three requests sent: taskcreate, taskmove, tasklist
         assert len(transport.calls) == 3
@@ -353,7 +355,8 @@ class TestListServiceMutation:
 
         assert result.outcome == WriteOutcome.CONFIRMED
         assert result.item_id == "task/123"
-        assert result.actual_list_id == "taskList/1"
+        assert result.actual_list_id is None
+        assert result.requested_list_id is None
         # Exactly two requests sent: taskcreate and tasklist (NO taskmove)
         call_endpoints = [c[0] for c in transport.calls]
         assert "taskmove" not in call_endpoints

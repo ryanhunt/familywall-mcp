@@ -9,7 +9,6 @@ import pytest
 from familywall_mcp.config import AppConfig
 from familywall_mcp.familywall.discovery import DiscoveredFamily, FamilyMember
 from familywall_mcp.models import FamilyContext, Principal
-from familywall_mcp.services.lists import WriteOutcome
 from familywall_mcp.storage.memory import InMemoryReceiptRepository
 from familywall_mcp.tools.registry import (
     ErrorResponse,
@@ -22,6 +21,7 @@ class FakeSessionPool:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, dict[str, str], str]] = []
+        self.created_items: dict[str, dict[str, object]] = {}  # metaId -> item info
 
     async def call(
         self,
@@ -33,96 +33,70 @@ class FakeSessionPool:
         """Record the call and return a synthetic result."""
         self.calls.append((principal.subject, endpoint, fields, read_write))
         if endpoint == "taskgettasklists":
-            return [
-                {
-                    "metaId": "taskList/1",
-                    "name": "Shopping",
-                    "taskListType": "SHOPPING_LIST",
-                    "totalTaskNumber": 5,
-                    "remainingTaskNumber": 3,
-                }
-            ]
+            return {
+                "taskLists": [
+                    {
+                        "metaId": "taskList/1",
+                        "name": "Shopping",
+                        "taskListType": "SHOPPING_LIST",
+                        "totalTaskNumber": 5,
+                        "remainingTaskNumber": 3,
+                    }
+                ]
+            }
         elif endpoint == "tasklist":
-            return [
-                {
-                    "metaId": "task/1",
-                    "text": "Milk",
-                    "complete": "false",
-                    "taskListId": "taskList/1",
-                }
-            ]
+            # Check if this is a lookup by list ID
+            list_id = fields.get("a00listId", "")
+            # Return items that were created/moved to this list
+            items = []
+            for item_id, item_info in self.created_items.items():
+                if item_info.get("taskListId") == list_id:
+                    items.append(
+                        {
+                            "metaId": item_id,
+                            "text": item_info.get("text", "Item"),
+                            "complete": "false",
+                            "taskListId": list_id,
+                        }
+                    )
+            # Always include at least one item for test compatibility
+            if not items:
+                items = [
+                    {
+                        "metaId": "task/1",
+                        "text": "Milk",
+                        "complete": "false",
+                        "taskListId": list_id or "taskList/1",
+                    }
+                ]
+            return {"listItems": items}
+        elif endpoint == "taskcreate":
+            item_id = "task/2"
+            text = fields.get("a00text", "Item")
+            # Record the created item as being in the default list initially
+            self.created_items[item_id] = {
+                "text": text,
+                "taskListId": "taskList/default",
+            }
+            return {
+                "metaId": item_id,
+                "text": text,
+                "taskListId": "taskList/default",
+            }
+        elif endpoint == "taskmove":
+            # Move the item to the target list
+            task_id = fields.get("a00taskId", "")
+            target_list_id = fields.get("a00taskListId", "")
+            if task_id in self.created_items:
+                self.created_items[task_id]["taskListId"] = target_list_id
+            return {"ok": True}
+        elif endpoint == "taskmark":
+            return {"ok": True}
         return {"synthetic": "result"}
 
     async def aclose(self) -> None:
         """Close the pool."""
         pass
-
-
-class FakeListService:
-    """Fake ListService for testing."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str]] = []
-
-    async def list_accessible_lists(self, principal: Principal) -> tuple:
-        """Return a fake list."""
-        from familywall_mcp.familywall.lists import ListType, ShoppingList
-
-        return (
-            ShoppingList(
-                list_id="taskList/1",
-                name="Shopping",
-                type_raw="SHOPPING_LIST",
-                known_type=ListType.SHOPPING,
-                total_items=5,
-                remaining_items=3,
-                color=None,
-                system_id=None,
-            ),
-        )
-
-    async def select_list(
-        self,
-        principal: Principal,
-        explicit_list_id: str | None = None,
-        default_list_id: str | None = None,
-    ) -> object:
-        """Return a list selection."""
-        from familywall_mcp.familywall.lists import ListType, ShoppingList
-        from familywall_mcp.services.lists import ListSelection
-
-        resolved_list = ShoppingList(
-            list_id="taskList/1",
-            name="Shopping",
-            type_raw="SHOPPING_LIST",
-            known_type=ListType.SHOPPING,
-            total_items=5,
-            remaining_items=3,
-            color=None,
-            system_id=None,
-        )
-        return ListSelection(resolved=resolved_list, candidates=(), reason="default")
-
-    async def add_item(
-        self, principal, list_id, text, quantity, operation_id, receipt_repo, family_id
-    ):
-        """Fake add_item."""
-        from familywall_mcp.services.lists import AddItemResult
-
-        return (
-            AddItemResult(
-                outcome=WriteOutcome.CONFIRMED, quantity_written=quantity, item_id="task/2"
-            ),
-            (),
-        )
-
-    async def set_item_checked(
-        self, principal, item_id, checked, operation_id, receipt_repo, family_id
-    ):
-        """Fake set_item_checked."""
-        from familywall_mcp.services.lists import SetItemCheckedResult
-
-        return SetItemCheckedResult(outcome=WriteOutcome.CONFIRMED)
 
 
 class FakeCalendarService:
@@ -180,8 +154,11 @@ def create_registry(
     config: AppConfig,
     discovered_family: DiscoveredFamily,
     enable_writes: bool = False,
-) -> ToolRegistry:
-    """Factory for creating a ToolRegistry with test dependencies."""
+) -> tuple[ToolRegistry, FakeSessionPool]:
+    """Factory for creating a ToolRegistry with test dependencies.
+
+    Returns a tuple of (registry, pool) so tests can inspect pool.calls.
+    """
     pool = FakeSessionPool()
     principal = Principal(subject="test-subject")
     family_context = FamilyContext(
@@ -190,17 +167,17 @@ def create_registry(
         calendar_id="calendar/1",
     )
 
-    return ToolRegistry(
+    registry = ToolRegistry(
         config=config,
         session_pool=pool,  # type: ignore
         principal=principal,
         family_context=family_context,
         discovered_family=discovered_family,
         authenticated_member_timezone=discovered_family.members[0].timezone or "UTC",
-        list_service=FakeListService(),  # type: ignore
         calendar_service=FakeCalendarService(),  # type: ignore
         receipt_repository=InMemoryReceiptRepository(),
     )
+    return registry, pool
 
 
 @pytest.mark.asyncio
@@ -214,7 +191,7 @@ async def test_get_connection_status_returns_real_family_name() -> None:
         }
     )
     discovered = create_discovered_family()
-    registry = create_registry(config, discovered)
+    registry, _ = create_registry(config, discovered)
 
     result = await registry._get_connection_status()
 
@@ -227,7 +204,7 @@ async def test_get_connection_status_returns_real_family_name() -> None:
 
 @pytest.mark.asyncio
 async def test_list_shopping_lists_names_family() -> None:
-    """list_shopping_lists response names the discovered family."""
+    """Criterion 6: list_shopping_lists issues taskgettasklists with read mode."""
     config = AppConfig.from_env(
         {
             "FAMILYWALL_LOCAL_SUBJECT": "test-local-user",
@@ -235,18 +212,23 @@ async def test_list_shopping_lists_names_family() -> None:
         }
     )
     discovered = create_discovered_family()
-    registry = create_registry(config, discovered)
+    registry, pool = create_registry(config, discovered)
 
     result = await registry._list_shopping_lists()
 
     assert isinstance(result, object)
     assert result.family_name == "The Test Family"
     assert len(result.lists) > 0
+    # Assert on the recorded pool calls
+    assert len(pool.calls) == 1
+    subject, endpoint, fields, read_write = pool.calls[0]
+    assert endpoint == "taskgettasklists"
+    assert read_write == "read"
 
 
 @pytest.mark.asyncio
 async def test_get_list_items_names_family() -> None:
-    """get_list_items response names the discovered family."""
+    """Criterion 7: get_list_items issues tasklist with a00listId and read mode."""
     config = AppConfig.from_env(
         {
             "FAMILYWALL_LOCAL_SUBJECT": "test-local-user",
@@ -254,12 +236,18 @@ async def test_get_list_items_names_family() -> None:
         }
     )
     discovered = create_discovered_family()
-    registry = create_registry(config, discovered)
+    registry, pool = create_registry(config, discovered)
 
     result = await registry._get_list_items("taskList/1")
 
     assert isinstance(result, object)
     assert result.family_name == "The Test Family"
+    # Assert on the recorded pool calls
+    assert len(pool.calls) == 1
+    subject, endpoint, fields, read_write = pool.calls[0]
+    assert endpoint == "tasklist"
+    assert fields.get("a00listId") == "taskList/1"
+    assert read_write == "read"
 
 
 @pytest.mark.asyncio
@@ -272,7 +260,7 @@ async def test_get_week_overview_uses_discovered_timezone_fallback() -> None:
         }
     )
     discovered = create_discovered_family()
-    registry = create_registry(config, discovered)
+    registry, _ = create_registry(config, discovered)
 
     result = await registry._get_week_overview(reference_date=None, timezone=None)
 
@@ -283,7 +271,7 @@ async def test_get_week_overview_uses_discovered_timezone_fallback() -> None:
 
 @pytest.mark.asyncio
 async def test_add_list_item_refused_when_writes_disabled() -> None:
-    """add_list_item refuses with zero upstream calls when writes_disabled."""
+    """Criterion 10: add_list_item refuses with zero recorded pool calls when writes_disabled."""
     config = AppConfig.from_env(
         {
             "FAMILYWALL_LOCAL_SUBJECT": "test-local-user",
@@ -292,17 +280,19 @@ async def test_add_list_item_refused_when_writes_disabled() -> None:
         }
     )
     discovered = create_discovered_family()
-    registry = create_registry(config, discovered, enable_writes=False)
+    registry, pool = create_registry(config, discovered, enable_writes=False)
 
     result = await registry._add_list_item("Test Item")
 
     assert isinstance(result, ErrorResponse)
     assert result.error_code == "writes_disabled"
+    # Zero pool calls when writes are disabled
+    assert len(pool.calls) == 0
 
 
 @pytest.mark.asyncio
 async def test_set_list_item_checked_refused_when_writes_disabled() -> None:
-    """set_list_item_checked refuses with zero upstream calls when writes_disabled."""
+    """Criterion 10: set_list_item_checked refuses with zero pool calls when disabled."""
     config = AppConfig.from_env(
         {
             "FAMILYWALL_LOCAL_SUBJECT": "test-local-user",
@@ -311,12 +301,68 @@ async def test_set_list_item_checked_refused_when_writes_disabled() -> None:
         }
     )
     discovered = create_discovered_family()
-    registry = create_registry(config, discovered, enable_writes=False)
+    registry, pool = create_registry(config, discovered, enable_writes=False)
 
     result = await registry._set_list_item_checked("task/1", True)
 
     assert isinstance(result, ErrorResponse)
     assert result.error_code == "writes_disabled"
+    # Zero pool calls when writes are disabled
+    assert len(pool.calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_set_list_item_checked_verifies_and_marks() -> None:
+    """Criterion 9: set_list_item_checked verifies membership before marking."""
+    config = AppConfig.from_env(
+        {
+            "FAMILYWALL_LOCAL_SUBJECT": "test-local-user",
+            "FAMILYWALL_MODE": "stdio",
+            "FAMILYWALL_ENABLE_WRITES": "true",
+        }
+    )
+    discovered = create_discovered_family()
+    pool = FakeSessionPool()
+    principal = Principal(subject="test-subject")
+    family_context = FamilyContext(
+        account_id="acct/1",
+        family_id="family/1",
+        calendar_id="calendar/1",
+    )
+    receipt_repo = InMemoryReceiptRepository()
+
+    registry = ToolRegistry(
+        config=config,
+        session_pool=pool,  # type: ignore
+        principal=principal,
+        family_context=family_context,
+        discovered_family=discovered,
+        authenticated_member_timezone="Australia/Sydney",
+        calendar_service=FakeCalendarService(),  # type: ignore
+        receipt_repository=receipt_repo,
+    )
+
+    # Call set_list_item_checked
+    result = await registry._set_list_item_checked("task/1", True, idempotency_key="op-123")
+
+    assert result.family_name == "The Test Family"
+    assert result.outcome == "confirmed"
+
+    # Verify the recorded pool calls:
+    # 1. taskgettasklists for list access verification
+    # 2. tasklist for list access verification
+    # 3. taskmark for marking the item
+    endpoint_calls = [call[1] for call in pool.calls]
+    assert "taskgettasklists" in endpoint_calls
+    assert "tasklist" in endpoint_calls
+    assert "taskmark" in endpoint_calls
+
+    # Verify taskmark call has a00complete as string "true"
+    taskmark_calls = [call for call in pool.calls if call[1] == "taskmark"]
+    assert len(taskmark_calls) == 1
+    _, _, fields, read_write = taskmark_calls[0]
+    assert fields.get("a00complete") == "true"
+    assert read_write == "write"
 
 
 @pytest.mark.asyncio
@@ -337,7 +383,7 @@ async def test_error_response_is_safe() -> None:
 
 @pytest.mark.asyncio
 async def test_add_list_item_with_idempotency_uses_receipt_repo() -> None:
-    """add_list_item uses the shared receipt repository for replay protection."""
+    """Criterion 8: add_list_item issues create, move, readback with write mode."""
     config = AppConfig.from_env(
         {
             "FAMILYWALL_LOCAL_SUBJECT": "test-local-user",
@@ -346,8 +392,6 @@ async def test_add_list_item_with_idempotency_uses_receipt_repo() -> None:
         }
     )
     discovered = create_discovered_family()
-
-    # Create registry with writes enabled
     pool = FakeSessionPool()
     principal = Principal(subject="test-subject")
     family_context = FamilyContext(
@@ -364,7 +408,6 @@ async def test_add_list_item_with_idempotency_uses_receipt_repo() -> None:
         family_context=family_context,
         discovered_family=discovered,
         authenticated_member_timezone="Australia/Sydney",
-        list_service=FakeListService(),  # type: ignore
         calendar_service=FakeCalendarService(),  # type: ignore
         receipt_repository=receipt_repo,
     )
@@ -377,6 +420,23 @@ async def test_add_list_item_with_idempotency_uses_receipt_repo() -> None:
     )
 
     assert result1.family_name == "The Test Family"
+    assert result1.outcome == "confirmed"
+
+    # Verify the recorded pool calls for add flow:
+    # 1. taskgettasklists for list selection
+    # 2. taskcreate for item creation
+    # 3. taskmove for moving to target list
+    # 4. tasklist for readback
+    endpoint_calls = [call[1] for call in pool.calls]
+    assert "taskgettasklists" in endpoint_calls
+    assert "taskcreate" in endpoint_calls
+    assert "taskmove" in endpoint_calls
+    assert "tasklist" in endpoint_calls
+
+    # Verify write mode for create and move
+    for _subject, endpoint, _fields, read_write in pool.calls:
+        if endpoint in ("taskcreate", "taskmove"):
+            assert read_write == "write", f"{endpoint} should use write mode"
 
     # Verify receipt was stored
     receipt = await receipt_repo.get(principal, "test-key-123")

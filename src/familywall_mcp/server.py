@@ -14,7 +14,6 @@ from familywall_mcp.familywall.client import FamilyWallSession
 from familywall_mcp.familywall.discovery import build_discovery_fields, parse_discovery
 from familywall_mcp.models import Principal
 from familywall_mcp.services.calendar import CalendarService
-from familywall_mcp.services.lists import ListService
 from familywall_mcp.services.session import SessionPool
 from familywall_mcp.services.transport import read_transport
 from familywall_mcp.storage.memory import InMemoryReceiptRepository
@@ -98,7 +97,6 @@ async def run_server() -> int:
 
         # Create services
         read_xport = read_transport(session_pool, principal)
-        list_service = ListService(read_xport)
         calendar_service = CalendarService(read_xport)
 
         # Create receipt repository for the entire server lifetime
@@ -112,7 +110,6 @@ async def run_server() -> int:
             family_context=family_context,
             discovered_family=discovered,
             authenticated_member_timezone=auth_member_timezone,
-            list_service=list_service,
             calendar_service=calendar_service,
             receipt_repository=receipt_repository,
         )

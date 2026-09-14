@@ -85,8 +85,10 @@ class AddItemResult(DomainModel):
 
     outcome: WriteOutcome
     item_id: str | None = None  # populated if confirmed, acknowledged, or misfiled
-    actual_list_id: str | None = None  # the list it actually landed in (for misfiled)
-    requested_list_id: str | None = None  # the list that was requested (for misfiled)
+    # Populated if and only if outcome is misfiled:
+    actual_list_id: str | None = None  # the list it actually landed in
+    # Populated if and only if outcome is misfiled:
+    requested_list_id: str | None = None  # the list that was requested
 
 
 class SetItemCheckedResult(DomainModel):
@@ -382,8 +384,6 @@ class ListService:
             result_data = {
                 "outcome": WriteOutcome.CONFIRMED.value,
                 "item_id": created_item_id,
-                "actual_list_id": created_list_id,
-                "requested_list_id": list_id,
             }
             final_receipt = OperationReceipt(
                 subject=principal.subject,
@@ -406,8 +406,8 @@ class ListService:
                 AddItemResult(
                     outcome=outcome,
                     item_id=created_item_id,
-                    actual_list_id=created_list_id,
-                    requested_list_id=list_id,
+                    actual_list_id=None,
+                    requested_list_id=None,
                 ),
                 items,
             )
@@ -486,8 +486,6 @@ class ListService:
             result_data = {
                 "outcome": WriteOutcome.ACKNOWLEDGED.value,
                 "item_id": created_item_id,
-                "actual_list_id": created_list_id,
-                "requested_list_id": list_id,
             }
             final_receipt = OperationReceipt(
                 subject=principal.subject,
@@ -504,8 +502,8 @@ class ListService:
                 AddItemResult(
                     outcome=WriteOutcome.ACKNOWLEDGED,
                     item_id=created_item_id,
-                    actual_list_id=created_list_id,
-                    requested_list_id=list_id,
+                    actual_list_id=None,
+                    requested_list_id=None,
                 ),
                 (),
             )
@@ -518,8 +516,6 @@ class ListService:
         result_data = {
             "outcome": outcome.value,
             "item_id": created_item_id,
-            "actual_list_id": created_list_id,
-            "requested_list_id": list_id,
         }
         final_receipt = OperationReceipt(
             subject=principal.subject,
@@ -537,8 +533,8 @@ class ListService:
             AddItemResult(
                 outcome=outcome,
                 item_id=created_item_id,
-                actual_list_id=created_list_id,
-                requested_list_id=list_id,
+                actual_list_id=None,
+                requested_list_id=None,
             ),
             items,
         )

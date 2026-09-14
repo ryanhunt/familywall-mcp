@@ -82,8 +82,10 @@ class AddListItemResponse(DomainModel):
     family_name: str
     outcome: str
     item_id: str | None
-    actual_list_id: str | None = None  # For misfiled: where the item actually is
-    requested_list_id: str | None = None  # For misfiled: where it was supposed to go
+    # Populated if and only if outcome is misfiled:
+    actual_list_id: str | None = None  # where the item actually is
+    # Populated if and only if outcome is misfiled:
+    requested_list_id: str | None = None  # where it was supposed to go
 
 
 class SetListItemCheckedResponse(DomainModel):
@@ -116,7 +118,6 @@ class ToolRegistry:
         family_context: FamilyContext,
         discovered_family: DiscoveredFamily,
         authenticated_member_timezone: str,
-        list_service: ListService,
         calendar_service: CalendarService,
         receipt_repository: ReceiptRepository,
     ) -> None:
@@ -129,7 +130,6 @@ class ToolRegistry:
             family_context: The family context from discovery.
             discovered_family: The complete discovered family with members and names.
             authenticated_member_timezone: The authenticated member's timezone for fallback.
-            list_service: The list service.
             calendar_service: The calendar service.
             receipt_repository: The receipt repository for idempotency tracking.
         """
@@ -139,7 +139,6 @@ class ToolRegistry:
         self._family_context = family_context
         self._discovered_family = discovered_family
         self._authenticated_member_timezone = authenticated_member_timezone
-        self._list_service = list_service
         self._calendar_service = calendar_service
         self._receipt_repository = receipt_repository
 
