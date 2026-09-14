@@ -19,7 +19,30 @@ live Claude/ChatGPT connector).
   and a DDNS hostname like `your-nas.example.com`.
 - A free port on the NAS to dedicate to this service (e.g. `4043`).
 
-## 1. Configure users and secrets
+## 1. Get the code
+
+Clone the repository onto the NAS (or wherever you run `docker compose` from
+— the NAS itself via SSH, or a machine with the NAS's volumes mounted):
+
+```bash
+git clone https://github.com/ryanhunt/familywall-mcp.git
+cd familywall-mcp
+```
+
+If you already have a clone from an earlier install, update it to the latest
+`main` before redeploying:
+
+```bash
+git checkout main
+git fetch origin
+git merge origin/main
+```
+
+(`git merge origin/main` after a `fetch` is equivalent to `git pull` — if you
+have local edits to tracked files like `.env`, commit or stash them first so
+the merge doesn't conflict.)
+
+## 2. Configure users and secrets
 
 Copy `.env.example` to `.env` and fill in the hosted-mode section, same as
 the standard hosted-mode setup:
@@ -53,7 +76,7 @@ openssl rand -base64 32
 Add `FAMILYWALL_USER_2_*`, `FAMILYWALL_USER_3_*`, etc. for additional family
 members. See `.env.example` for the full list of variables.
 
-## 2. Deploy the container
+## 3. Deploy the container
 
 This setup skips Caddy entirely — DSM is already your reverse proxy and
 certificate manager. Use [`docker-compose.nas.yml`](../docker-compose.nas.yml)
@@ -76,7 +99,7 @@ ports:
   - "18000:8000"   # host:container — point DSM's reverse proxy at 18000
 ```
 
-## 3. Point DSM's reverse proxy at the container
+## 4. Point DSM's reverse proxy at the container
 
 In **DSM Control Panel → Login Portal → Advanced → Reverse Proxy**, create a
 rule:
@@ -92,7 +115,7 @@ Save, then verify:
 curl https://your-nas.example.com:4043/health
 ```
 
-## 4. Add it to Claude or ChatGPT
+## 5. Add it to Claude or ChatGPT
 
 In Claude or ChatGPT's custom-connector / MCP settings, add
 `https://your-nas.example.com:4043/mcp`. The client redirects to this
