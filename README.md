@@ -218,7 +218,10 @@ in named Docker volumes (`familywall_data`, `caddy_data`, `caddy_config`).
 
 `docker-compose.yml` (without `.prod`) is a local-only variant that runs just
 the app container bound to `127.0.0.1:8000`, for testing without Caddy or a
-real domain.
+real domain. If you already have your own HTTPS reverse proxy (e.g. a
+Synology NAS's built-in one), see
+[docs/synology-nas.md](docs/synology-nas.md) and
+`docker-compose.nas.yml` for a Caddy-free variant.
 
 Check it's up:
 
