@@ -1,0 +1,22 @@
+# Docker Compose configuration for deployments where a NAS or router already
+# terminates HTTPS (e.g. Synology DSM's own reverse proxy) and forwards a
+# custom external port straight to this container. No Caddy, no certificate
+# management here — see docs/synology-nas.md.
+
+version: "3.8"
+
+services:
+  familywall-mcp:
+    build: .
+    ports:
+      # Bind the app's internal port 8000 to a host port of your choosing.
+      # Point your NAS's reverse proxy / port forward at this host port.
+      - "8000:8000"
+    env_file: .env
+    volumes:
+      # Persistent SQLite database and OAuth token state
+      - familywall_data:/data
+    restart: unless-stopped
+
+volumes:
+  familywall_data:
