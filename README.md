@@ -194,6 +194,7 @@ FAMILYWALL_MODE=hosted
 FAMILYWALL_PUBLIC_URL=https://your-domain.com
 FAMILYWALL_AUTH_SECRET_KEY=<random-32+-character-string>
 FAMILYWALL_ALLOWED_REDIRECT_URI_HOSTS=claude.ai,chatgpt.com
+FAMILYWALL_BASE_URL=https://api.familywall.com
 
 FAMILYWALL_USER_1_MCP_USERNAME=alice
 FAMILYWALL_USER_1_MCP_PASSWORD=<mcp-password-alice-will-log-in-with>
@@ -268,7 +269,7 @@ See `.env.example` for the full, commented list. In short:
 | --- | --- | --- |
 | `FAMILYWALL_MODE` | both | `stdio` or `hosted` |
 | `FAMILYWALL_LOCAL_SUBJECT` | stdio | Any stable local identifier for the single stdio user |
-| `FAMILYWALL_BASE_URL` | stdio | FamilyWall API base URL (`https://api.familywall.com`) |
+| `FAMILYWALL_BASE_URL` | both | FamilyWall API base URL. Set it to `https://api.familywall.com` (do not append `/api`). |
 | `FAMILYWALL_EMAIL` / `FAMILYWALL_PASSWORD` | stdio | The FamilyWall account this stdio server acts as |
 | `FAMILYWALL_ENABLE_WRITES` | both | `true`/`false` — write tools refuse until this is `true` |
 | `FAMILYWALL_DATABASE_PATH` | both | SQLite path for write receipts (and OAuth state in hosted mode) |

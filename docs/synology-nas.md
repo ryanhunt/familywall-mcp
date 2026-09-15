@@ -56,6 +56,7 @@ FAMILYWALL_MODE=hosted
 FAMILYWALL_PUBLIC_URL=https://your-nas.example.com:4043
 FAMILYWALL_AUTH_SECRET_KEY=<random-32+-character-string>
 FAMILYWALL_ALLOWED_REDIRECT_URI_HOSTS=claude.ai,chatgpt.com
+FAMILYWALL_BASE_URL=https://api.familywall.com
 
 FAMILYWALL_USER_1_MCP_USERNAME=alice
 FAMILYWALL_USER_1_MCP_PASSWORD=<mcp-password-alice-will-log-in-with>
@@ -66,6 +67,9 @@ FAMILYWALL_USER_1_FW_PASSWORD=<alice's real FamilyWall password>
 `FAMILYWALL_PUBLIC_URL` must include the custom port — the OAuth provider
 uses this value to build redirect URIs, and it has to match exactly what
 clients will hit from the outside.
+
+`FAMILYWALL_BASE_URL` is the upstream FamilyWall API, not the NAS address.
+Set it exactly to `https://api.familywall.com` (without an `/api` suffix).
 
 Generate the secret key with:
 
