@@ -352,9 +352,10 @@ returned a success envelope, and a verification re-read found none remaining.
 Deletion is immediate and there is no trash or undo, so it must never be offered
 as a v1 tool without an explicit confirmation design.
 
-`taskupdate` remains `source-only` (web client) and unexercised. Both stay
-outside v1 scope, but cleanup of test items no longer requires the FamilyWall
-UI.
+`taskupdate` remains unexercised; the web app itself uses `taskupdate2`, which
+is live-verified as a patch (see
+[Probe A2](#probe-a2--list-assignment-and-the-2-endpoints-2026-09-25)).
+Cleanup of test items no longer requires the FamilyWall UI.
 
 ## Mutation acknowledgement
 
@@ -515,6 +516,55 @@ so retrying the pair creates a second item.
 
 `taskmark`'s third parameter, `completedDateForTesting`, is not used by this
 project.
+
+## Probe A2 — list assignment and the `…2` endpoints (2026-09-25)
+
+Captured from the FamilyWall web app's own requests with the account owner
+signed in, then checked with scripted calls. Only key names, value shapes and
+masked IDs were recorded. Four disposable items were created, and all were
+deleted with `taskdelete`.
+
+**The web app uses `taskcreate2` and `taskupdate2`.** It does not use the
+`taskcreate`/`taskupdate` pair declared in its bundle. It also batches requests:
+the create travelled as sub-call `a01` behind a `taskgettasksuggestionswcat`
+request, with `a01`-prefixed fields.
+
+| Endpoint | Web form | Evidence |
+| --- | --- | --- |
+| `taskcreate2` | `taskListId`, `text`, `assignee=$empty`, `taskCategoryId=""`, `dueDate=$empty`, `picture=$empty` | live-verified |
+| `taskupdate2` | `taskId` (`task/…`), `text`, `description`, `taskCategoryId`, `dueDate` (UTC instant or `$empty`), `recurrency`, `recurrencyInterval`, `byDay`, `byMonthDay`, `recurrencyEndDate`, `reminder.reminderType`/`reminderUnit`/`reminderValue`, `toAll`, `assignee.N`, `taskListId`, `picture` | live-verified |
+
+**Assignment encodings.**
+
+| Selection | Sent | Read back |
+| --- | --- | --- |
+| Nobody (web quick-add) | `taskcreate2` with `assignee=$empty` | `toAll:"false"`, `assigneeIds: []` |
+| Two named members | `toAll=false`, `assignee.0`, `assignee.1` | those two IDs, in order |
+| Everyone ("Assigned to everyone") | `toAll=true` **and** `assignee.N` for every member | `toAll:"true"`, and `assigneeIds` lists **every** member, in a different order |
+| `taskcreate` as `add_list_item` sends it (`a00text` only) | — | default list, `toAll:"true"`, every member assigned |
+
+For tasks, unlike events, "everyone" reads back with the full member list, so
+compare assignees as a set.
+
+**`taskupdate2` patches.** A scripted call with only `partnerScope`, `taskId`,
+`toAll=false` and `assignee.0` changed the assignment and nothing else. `text`,
+`description`, `dueDate`, the reminder and the list were all unchanged. The
+brief 09 risk (an assignee change clearing a due date) does not occur on this
+endpoint. The legacy `taskupdate` remains unexercised and should not be used.
+
+**`taskmove` keeps the assignment**, and also the description, due date and
+reminder.
+
+**`taskcreate2` creates directly in a chosen list.** A scripted call with a
+non-default list's `taskListId`, `toAll=false` and `assignee.0` created the item
+in that list with exactly that assignee, in one call. `taskcreate` still has no
+list parameter (the 2026-09-14 finding stands for that endpoint), but
+`taskcreate2` makes the non-atomic create-then-move of ADR 0002 avoidable.
+
+**Reads.** `dueDate` and `description` appear on task objects once they are set.
+Earlier samples lacked them only because they were unset. The reminder reads
+back as `{reminderUnit, reminderType, reminderValue, localId}`, with
+`reminderType:"NONE"` when there is none.
 
 ## Open questions
 

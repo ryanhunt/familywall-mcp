@@ -1,7 +1,9 @@
 # FamilyWall calendar contract
 
-Status: **live-verified for reads, and for creating one timed, non-recurring,
-single-attendee event** (2026-09-25; see [Mutations](#mutations)). Produced by P0 task 00B on 2026-09-13 from
+Status: **live-verified for reads, for event create (timed and all-day, with
+everyone, named-member and single-attendee encodings), for attendee-only
+`evtupdate`, and for `evtdelete` of non-recurring events** (2026-09-25; see
+[Mutations](#mutations)). Produced by P0 task 00B on 2026-09-13 from
 `familywall-api@c85bb152115d3c41ab90322ef9dce732122ff4c0`, then settled by the
 02P read-only live probe on 2026-09-13 against a real family calendar
 (47 events in a one-month window, 1115 in a three-year window).
@@ -122,10 +124,9 @@ line in this contract:
 When `allDay` is `"false"`, `startDate` and `endDate` are genuine UTC instants
 and must be converted through the user's timezone normally.
 
-Only single-day all-day events were observed (`start` and `end` share a date).
-Multi-day all-day is expected to be the same encoding across two dates, but that
-is `pending-live`: the port must handle a differing start and end date, and a
-test week containing one is required before case 6 below can be marked passing.
+Multi-day all-day is the same encoding across two dates, **live-verified
+2026-09-25**: an event created for 1–2 October read back as
+`2026-10-01T00:00:00.000Z` to `2026-10-02T23:59:59.000Z` with `allDay:"true"`.
 
 ### Boundary semantics — settled
 
@@ -250,23 +251,72 @@ Observed:
 - `evtlistinterval` returned the same ID with identical fields, so the tool's
   outcome was `confirmed`.
 
-Still `pending-live`: all-members (`isToAll=true`) and multiple-attendee
-encodings, all-day creation (no `allDay` field is known for writes), and a
-daylight-saving-period event (the same code path, but only a `+10:00` instant
-was observed).
+A daylight-saving instant is also verified: `2026-10-07T09:00` in
+`Australia/Sydney` (`+11:00`) was stored as `2026-10-06T22:00:00.000Z`, and the
+tool returned `confirmed` (2026-09-25).
 
-### `evtdelete` — live-verified for one non-recurring event, not exposed
+### Probe A1 — the web app's own forms (2026-09-25)
 
-`partnerScope=Family`, `option=All`, `eventId.0=<eventId>` returned `"true"` and
-the event was absent on readback (2026-09-25, cleanup of the live check only).
-No tool exposes it. On a recurring occurrence `option=All` remains unobserved
-and plausibly deletes the whole series.
+Captured from the FamilyWall web app's `evtcreate`, `evtupdate` and `evtdelete`
+requests, with the account owner signed in. Only key names, value shapes and
+masked IDs were recorded. Five disposable events were created and all were
+deleted by exact ID.
 
-### `evtupdate` — excluded
+**Timed create.** The web form sends the same fields `create_calendar_event`
+sends, with these differences:
 
-Fields as create, plus `metaId`. `source-only`, and unsafe without
-occurrence-versus-series semantics. `$empty` appears to be a sentinel for an
-omitted value; its exact meaning is `source-only`.
+| Field | Web app | `create_calendar_event` |
+| --- | --- | --- |
+| `startDate` / `endDate` | UTC instant, `2026-09-29T23:00:00.000Z` | local time with offset; both store the same instant |
+| `color` | `""` | omitted; both accepted |
+| `reminderList` | indexed fields, `reminderList.0.reminderType=SNOOZE`, `reminderList.0.reminderUnit=MINUTE`, `reminderList.0.reminderValue=30` by default | `$empty` (no reminder) |
+
+**Attendee encodings.**
+
+| Selection | Sent | Read back |
+| --- | --- | --- |
+| Everyone (the web form's default, "Attendees: All") | `isToAll=true` **and** `attendee.N.accountId` for every member (all five) | `toAll:"true"`, `attendeeIds: []` |
+| Two named members | `isToAll=false`, `attendee.0.accountId`, `attendee.1.accountId`, in selection order | `toAll:"false"`, `attendeeIds` equal to those two, in order |
+| One member (earlier checks) | `isToAll=false`, `attendee.0.accountId` | one `attendeeIds` entry |
+
+The creator is not added as an attendee unless selected.
+
+**All-day create.** `allDay=true`, `startDate=<first day>T00:00:00.000Z`,
+`endDate=<last day>T23:59:59.000Z`, and **no `timeZone` field**. The web
+default reminder is `reminderValue=0`, which the app shows as "On day of event
+at 9:00 am".
+
+**Reads.** An empty `where` or `color` is omitted from the event object. The
+reminder reads back as `reminderList: [{localId, reminderType, reminderUnit,
+reminderValue}]`, plus `reminder` (the first entry), which maps directly onto
+the indexed write fields.
+
+### `evtupdate` — live-verified as a patch, not exposed yet
+
+The web form sends `partnerScope=Family`, `option=All`,
+`calendarId=calendar/{family_id}`, `metaId=<eventId>`, then the complete create
+field set again. The response is the full updated event object.
+
+**The server patches.** A scripted `evtupdate` carrying only `partnerScope`,
+`option=All`, `calendarId`, `metaId`, `isToAll=false` and two
+`attendee.N.accountId` entries, on a non-recurring event, left `text`, both
+instants, `timeZone`, `allDay`, the reminder, `private` and `recurrency`
+unchanged. The attendee list became **exactly** the entries sent: the attendee
+set is replaced, not merged (2026-09-25).
+
+Not observed: whether a non-empty `where` or `description` survives an update
+that omits it (the test event had neither), `evtupdate` on an all-day event, and
+any recurring event. On a recurring event `option=All` presumably updates the
+whole series. `$empty` appears to be a sentinel for an omitted value; its exact
+meaning is `source-only`.
+
+### `evtdelete` — live-verified for non-recurring events, not exposed
+
+The web app sends `partnerScope=Family`, `option=All`, `eventId=<eventId>`. The
+reference client's `eventId.0=<eventId>` is also accepted. Both returned
+`"true"`, and the event was absent on readback (2026-09-25; four events deleted
+this way). No tool exposes it. On a recurring occurrence `option=All` remains
+unobserved and plausibly deletes the whole series.
 
 ## Test cases the port must satisfy
 
@@ -279,7 +329,7 @@ Case 12 is now representable and cases 5 and 6 have a settled encoding.
 | 3 | Sunday-start and Monday-start week configurations | writable now |
 | 4 | An event crossing midnight appears on both days | writable now |
 | 5 | An event crossing the week boundary appears in both weeks | writable now — the server returns overlaps |
-| 6 | A multi-day all-day event appears on every day it covers | writable from the encoding; **live confirmation still pending** — only single-day all-day events were observed |
+| 6 | A multi-day all-day event appears on every day it covers | writable now — encoding live-verified 2026-09-25 |
 | 7 | An explicit UTC offset is honoured; a naive datetime is rejected | writable now |
 | 8 | An unparseable event does not discard the whole response | writable now |
 | 9 | An unrecognised `eventType` or object is preserved, not dropped | writable now — `BIRTHDAY_ACCOUNT` is a real example |
@@ -296,17 +346,18 @@ sections above: calendar ID validity, boundary inclusivity, overlap, all-day
 encoding, recurrence expansion, occurrence identity, cancellation, foreign
 object types, and result caps.
 
+Answered by probe A1 on 2026-09-25: multi-day all-day encoding, the everyone
+and named-member attendee encodings, the all-day write form, `evtupdate`
+patch semantics for attendees, and `evtdelete` for non-recurring events.
+
 Still `pending-live`:
 
-1. **Multi-day all-day encoding.** Expected to be `<startdate>T00:00:00.000Z`
-   to `<enddate>T23:59:59.000Z`, but not observed. Needs a deliberately created
-   test event.
-2. **Whether `eventType` has values beyond `UNKNOWN` and `BIRTHDAY_ACCOUNT`,**
+1. **Whether `eventType` has values beyond `UNKNOWN` and `BIRTHDAY_ACCOUNT`,**
    and whether tasks or meals appear in interval results. `evtsync`'s flags say
    they can appear somewhere; they did not appear here. Unknown types are
    preserved, so this is a presentation question, not a correctness one.
-3. **Whether a silent result cap exists** above 1115 events. The port bounds its
+2. **Whether a silent result cap exists** above 1115 events. The port bounds its
    own window regardless.
-4. **Write paths beyond one timed, single-attendee create** — all-members and
-   multiple attendees, all-day create, `evtupdate`, and `evtdelete` on a
-   recurring occurrence.
+3. **Remaining write questions** — whether `evtupdate` keeps a non-empty
+   `where`/`description` it was not sent, `evtupdate` on an all-day event, and
+   any write to a recurring series or occurrence.
