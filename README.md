@@ -2,21 +2,50 @@
 
 A [Model Context Protocol](https://modelcontextprotocol.io) server that gives
 Claude, ChatGPT and other MCP clients access to a [FamilyWall](https://familywall.com)
-account: shopping lists and a timezone-aware view of the family calendar. Not
-affiliated with FamilyWall.
+account: shopping and to-do lists, a timezone-aware view of the family calendar,
+calendar events, and who in the family each item or event is for. Not affiliated
+with FamilyWall.
 
 It ports the useful parts of the [FamilyWall web API](https://github.com/ryanhunt/familywall-api)
 (itself reverse-engineered protocol research) into a typed async Python client
-and an MCP server, so an AI assistant can read a family's shopping lists and
-week, and add or check off items, without ever seeing raw FamilyWall
-credentials in a prompt.
+and an MCP server, so an AI assistant can read a family's lists and week, add
+or check off items, create calendar events, and assign items and events to
+family members by name, without ever seeing raw FamilyWall credentials (or
+FamilyWall account IDs) in a prompt.
 
-**Current status:** the local **stdio** server is implemented and
-live-verified end to end against a real FamilyWall account, including writes.
+**Current status (version 0.2.0):** the local **stdio** server is implemented,
+and all ten tools are live-verified end to end against a real FamilyWall
+account, including every write.
 Hosted OAuth and Docker/HTTPS deployment are implemented and unit-tested, but
 have **not** yet been verified against a real Claude or ChatGPT connector over
 HTTPS — see [Known limitations](#known-limitations) and
 [docs/PROGRESS.md](docs/PROGRESS.md) for the authoritative phase table.
+
+## What's new in 0.2.0
+
+- **Assign items and events to family members.** `create_calendar_event` and
+  `add_list_item` take `assigned_to`, a list of member names; the new
+  `set_calendar_event_attendees` and `set_list_item_assignees` change who an
+  existing event or item is for. Names are matched locally against your own
+  family and only FamilyWall account IDs are sent, so no name ever leaves the
+  server and no tool accepts or returns an account ID.
+- **Blank means everyone.** Leaving `assigned_to` out (or passing `[]`) assigns
+  the whole family. **This changes `create_calendar_event`**, which previously
+  assigned only the signed-in member.
+- **`list_family_members`** lists the exact names to use, and which member is
+  you. The week overview and list items now show who each event or item is
+  assigned to.
+- **`add_list_item` is a single call.** It creates the item directly in the
+  chosen list with its assignment, replacing the old create-then-move
+  ([ADR 0003](docs/decisions/0003-single-call-add.md)).
+- **Events get FamilyWall's default 30-minute reminder**, as the web app does.
+- **Receipts migrate in place.** Idempotency receipts are no longer
+  list-specific, and a definite refusal from FamilyWall now replays as the
+  same error.
+
+**Upgrading an existing deployment:** back up the data volume first. The
+receipts table is migrated in place on start-up, and older images cannot read
+a migrated database.
 
 ## What it does
 
@@ -91,6 +120,26 @@ A few things worth knowing about how these behave:
   `get_list_items` report `assigned_to` (names), `assigned_to_everyone`, and an
   `unresolved_members` count; `list_family_members` is how you learn the exact
   names to use. No tool accepts or returns a raw account ID.
+
+### Example requests
+
+You talk to your assistant normally; it picks the tools. With writes enabled:
+
+- *"Add milk to the shopping list."* → `add_list_item`, assigned to everyone.
+- *"Put 'book the plumber' on the to-do list for Alex."* → `list_family_members`
+  to find the exact name if needed, then `add_list_item` with
+  `assigned_to: ["Alex"]`.
+- *"Add a dentist appointment for Robin and me next Tuesday at 10."* →
+  `create_calendar_event` with both names; the assistant reports whether
+  FamilyWall confirmed it.
+- *"Actually, make Tuesday's dentist appointment just for Robin."* →
+  `get_week_overview` to find the event, then `set_calendar_event_attendees`.
+- *"Who's the soccer training on Thursday for?"* → `get_week_overview`, which
+  shows each event's assignees by name.
+
+Every write reports an outcome — `confirmed`, `acknowledged`, `mismatched`,
+`misfiled` or `unknown` — so the assistant can tell you exactly what happened
+rather than assuming success.
 
 See [docs/architecture.md](docs/architecture.md) for the full tool contract
 and the service rules (list selection, receipt semantics, timezone handling)
@@ -349,6 +398,13 @@ See `.env.example` for the full, commented list. In short:
 - **No self-service invitations or account pages.** Hosted users are
   configured statically by the operator via `.env`; onboarding a new family
   member means editing and redeploying `.env`.
+- **Member names must match exactly.** Names are matched case- and
+  spacing-insensitively against the family's display or first names, but there
+  is no fuzzy or partial matching: an unknown or ambiguous name fails before
+  anything is written. `list_family_members` shows the names to use.
+- **All-day and recurring events can't be created or edited.** Only timed,
+  one-off events are supported for writes; `set_calendar_event_attendees`
+  refuses all-day, recurring and special-calendar events before writing.
 - **All-day calendar dates are read verbatim, never timezone-converted** —
   by design, matching how FamilyWall itself stores them, but worth knowing if
   you build on top of the raw dates.
@@ -365,7 +421,9 @@ phase status.
 - [Implementation plan](docs/implementation-plan.md) — phases, dependencies, release acceptance
 - [Wire contracts](docs/contracts/familywall.md) and [calendar contracts](docs/contracts/calendar.md) — endpoint-level evidence
 - [ADR 0001](docs/decisions/0001-auth-and-sdk.md) — MCP SDK and auth approach
-- [ADR 0002](docs/decisions/0002-simplified-hosted-auth.md) — simplified hosted auth rationale
+- [ADR 0002 (hosted auth)](docs/decisions/0002-simplified-hosted-auth.md) — simplified hosted auth rationale
+- [ADR 0003](docs/decisions/0003-single-call-add.md) — single-call `add_list_item` (supersedes [ADR 0002, non-atomic add](docs/decisions/0002-non-atomic-add.md))
+- [Member assignment plan](docs/briefs/09-implementation-plan.md) — how assignment was probed, built and verified
 - [Contributing](CONTRIBUTING.md) — workflow and validation commands
 
 ## Credits
