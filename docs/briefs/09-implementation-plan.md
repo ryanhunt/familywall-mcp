@@ -13,7 +13,7 @@ gate, file boundary, acceptance criteria and who should implement it under the
 | 2. Member resolver | **Done** — slice B, offline, 2026-09-25 | [handoff](../handoffs/09b-member-resolver.md) |
 | 3. Read models | **Done** — slice B, offline, 2026-09-25. Live reads already show `attendeeIds`, `attendees`, `toAll` and `editable` on events, and `assignee`, `assigneeIds` and `toAll` on tasks | [handoff](../handoffs/09b-member-resolver.md), contracts |
 | 4. List assignment | Not started | — |
-| 5. Generalized receipts | Not started. `create_calendar_event` reuses `OperationReceipt` with the calendar ID in `list_id`, and tags its payload hash with the endpoint so a key reused across tools conflicts | [handoff 10](../handoffs/10-create-calendar-event.md) |
+| 5. Generalized receipts | **Done** (slice D, offline). `OperationReceipt.list_id` is now `resource_id` with an `action` field and a `rejected` status; legacy SQLite databases migrate in place | [handoff 09d](../handoffs/09d-receipts-migration.md) |
 | 6. Calendar attendees | **Create, self-only, done** (`create_calendar_event`). Attendee selection and `set_calendar_event_attendees` are not started | PR #9 |
 
 ## Decisions (settled by the account owner, 2026-09-25)
@@ -34,9 +34,18 @@ gate, file boundary, acceptance criteria and who should implement it under the
      everyone, omitting it is enough. Otherwise the verified everyone
      encoding is sent explicitly.
 2. **The receipt migration is accepted.** Deployment is Docker, and an older
-   image not reading a migrated database is acceptable. Slice D still records
-   a `PRAGMA user_version` and adds a one-line "back up the data volume before
-   upgrading" note to the deploy docs.
+   image not reading a migrated database is acceptable. Slice D adds a
+   one-line "back up the data volume before upgrading" note to the deploy
+   docs.
+   - **Decision E2 (superseded the plan below): schema detection, not
+     `user_version`.** The database file is shared with `OAuthSqliteStore`
+     (`server.py` passes `config.database_path` to both), so a database-wide
+     `PRAGMA user_version` would couple the two stores' schema histories.
+     Slice D instead detects the receipts schema with
+     `PRAGMA table_info(operation_receipts)`: no table creates the new
+     schema, a `list_id` column migrates, a `resource_id` column is a no-op.
+     See [handoff 09d](../handoffs/09d-receipts-migration.md) and
+     [brief 09d](09d-receipts-migration.md).
 3. **Live probe sessions.** The lead tells the account owner when A1 or A2 is
    ready, and they sign in to the FamilyWall web app in the in-app browser.
    Agents never type the password. Both probes write only disposable events and
@@ -58,7 +67,7 @@ gate, file boundary, acceptance criteria and who should implement it under the
 | A1 | Calendar attendee and `evtupdate` evidence | an owner sign-in | **done 2026-09-25** |
 | A2 | List assignment and update evidence | an owner sign-in | **done 2026-09-25** |
 | B | Member resolver, `list_family_members`, assignment read models | — | **done 2026-09-25** |
-| D | Generalized receipts and migration | — | now (offline) |
+| D | Generalized receipts and migration | — | **done 2026-09-25** |
 | C | Attendees on `create_calendar_event`, default everyone | A1, B | after A1 and B |
 | E | `set_calendar_event_attendees` | A1, B, D | after those |
 | F | List assignment, single-call `taskcreate2` add, `set_list_item_assignees` | A2, B, D | after those |
@@ -257,6 +266,10 @@ Files: `familywall/calendar.py` (builder), `services/calendar.py`,
 
 ## Slice D — Generalized receipts and migration
 
+**Status: done, offline.** Implemented per
+[brief 09d](09d-receipts-migration.md); see
+[handoff 09d](../handoffs/09d-receipts-migration.md) for the full evidence.
+
 **Implementer:** cheap agent. **Lead reviews the migration** (decision 2).
 
 Files: `models.py`, `interfaces.py`, `storage/memory.py`, `storage/sqlite.py`,
@@ -269,9 +282,16 @@ Files: `models.py`, `interfaces.py`, `storage/memory.py`, `storage/sqlite.py`,
   - Add the status `rejected`, a definite refusal that replays as the original
     error instead of `unknown`.
 - SQLite migration:
-  - It runs once, keyed on `PRAGMA user_version`.
-  - The CHECK constraint changes, so this is a table rebuild in one transaction:
-    create the new table, copy the rows, drop the old table, rename.
+  - **Detected by schema inspection, not `PRAGMA user_version`** (decision
+    E2): the database file is shared with `OAuthSqliteStore`, so a
+    database-wide version pragma would couple the two stores. Detection reads
+    `PRAGMA table_info(operation_receipts)` instead — no table creates the
+    new schema, a `list_id` column migrates, a `resource_id` column is a
+    no-op.
+  - The CHECK constraint changes, so this is a table rebuild in one transaction
+    (`BEGIN IMMEDIATE` ... `COMMIT`): create the new table, copy the rows,
+    drop the old table, rename. Any error rolls back, leaving the legacy
+    table and its rows untouched.
   - Idempotent on re-run; every existing row survives, and
     `(subject, operation_id)` isolation is kept.
 - Hashing: calendar hashes keep their endpoint tag. **List hashes do not
@@ -281,11 +301,11 @@ Files: `models.py`, `interfaces.py`, `storage/memory.py`, `storage/sqlite.py`,
   `rejected` on a refusal.
 
 **Acceptance:**
-- [ ] A migration test from a fixture database in the current schema preserves
+- [x] A migration test from a fixture database in the current schema preserves
   every row and field. A second `initialise()` is a no-op.
-- [ ] Replaying a legacy list receipt still returns its stored outcome.
-- [ ] A refused create replays as the refusal, with no upstream call.
-- [ ] README and NAS docs say to back up before upgrading.
+- [x] Replaying a legacy list receipt still returns its stored outcome.
+- [x] A refused create replays as the refusal, with no upstream call.
+- [x] README and NAS docs say to back up before upgrading.
 
 ## Slice E — `set_calendar_event_attendees`
 

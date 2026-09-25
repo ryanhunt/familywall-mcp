@@ -86,6 +86,10 @@ This setup skips Caddy entirely — DSM is already your reverse proxy and
 certificate manager. Use [`docker-compose.nas.yml`](../docker-compose.nas.yml)
 instead of `docker-compose.prod.yml`:
 
+If you are upgrading an existing deployment, back up the `familywall_data`
+volume first: this release migrates the receipts table in place, and an
+older image cannot read the migrated database.
+
 ```bash
 docker compose -f docker-compose.nas.yml up -d --build
 ```

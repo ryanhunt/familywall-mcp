@@ -15,6 +15,28 @@ if TYPE_CHECKING:
     from familywall_mcp.interfaces import Clock
     from familywall_mcp.models import OperationReceipt
 
+_SCHEMA_COLUMNS = """
+        subject       TEXT NOT NULL,
+        operation_id  TEXT NOT NULL,
+        family_id     TEXT NOT NULL,
+        resource_id   TEXT NOT NULL,
+        action        TEXT NOT NULL,
+        payload_hash  TEXT NOT NULL,
+        status        TEXT NOT NULL CHECK (
+            status IN ('pending', 'succeeded', 'unknown', 'rejected')
+        ),
+        upstream_id   TEXT,
+        expires_at    TEXT NOT NULL,
+        PRIMARY KEY (subject, operation_id)
+"""
+
+_FRESH_TABLE_DDL = f"CREATE TABLE IF NOT EXISTS operation_receipts (\n{_SCHEMA_COLUMNS})"
+
+_MIGRATION_TABLE_DDL = f"CREATE TABLE operation_receipts_new (\n{_SCHEMA_COLUMNS})"
+"""Deliberately lacks ``IF NOT EXISTS``: a pre-existing ``operation_receipts_new``
+(e.g. left over from a previous failed migration) must make the migration fail
+loudly rather than silently reuse or clobber it."""
+
 
 class SqliteReceiptRepository:
     """Receipt repository using SQLite for durability across process restarts.
@@ -39,10 +61,18 @@ class SqliteReceiptRepository:
         self._lock = asyncio.Lock()
 
     async def initialise(self) -> None:
-        """Create the database schema if it does not exist (idempotent).
+        """Create or migrate the database schema (idempotent).
 
         This method is safe to call multiple times. It enables WAL and foreign
-        key constraints, then creates the operation_receipts table if needed.
+        key constraints, then creates the ``operation_receipts`` table if it
+        does not exist, or migrates it in place if it is still on the legacy
+        ``list_id`` schema.
+
+        The database file is shared with ``OAuthSqliteStore`` (see
+        ``server.py``), so this deliberately does not use a database-wide
+        ``PRAGMA user_version`` to detect whether it has run before — that
+        would couple the two stores' schema histories. Instead, the receipts
+        schema itself is inspected with ``PRAGMA table_info(operation_receipts)``.
         """
 
         def _init_db() -> None:
@@ -59,25 +89,16 @@ class SqliteReceiptRepository:
                 # Enable foreign key constraints
                 conn.execute("PRAGMA foreign_keys=ON")
 
-                # Create table if it doesn't exist
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS operation_receipts (
-                        subject       TEXT NOT NULL,
-                        operation_id  TEXT NOT NULL,
-                        family_id     TEXT NOT NULL,
-                        list_id       TEXT NOT NULL,
-                        payload_hash  TEXT NOT NULL,
-                        status        TEXT NOT NULL CHECK (
-                            status IN ('pending', 'succeeded', 'unknown')
-                        ),
-                        upstream_id   TEXT,
-                        expires_at    TEXT NOT NULL,
-                        PRIMARY KEY (subject, operation_id)
-                    )
-                    """
-                )
-                conn.commit()
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(operation_receipts)")}
+
+                if not columns:
+                    # No table yet: create the current schema directly.
+                    conn.execute(_FRESH_TABLE_DDL)
+                    conn.commit()
+                elif "list_id" in columns:
+                    # Legacy schema: migrate in place, in one transaction.
+                    _migrate_legacy_table(conn)
+                # else: "resource_id" already present, nothing to do.
             finally:
                 conn.close()
 
@@ -110,7 +131,7 @@ class SqliteReceiptRepository:
 
                 cursor = conn.execute(
                     """
-                    SELECT subject, operation_id, family_id, list_id, payload_hash,
+                    SELECT subject, operation_id, family_id, resource_id, action, payload_hash,
                            status, upstream_id, expires_at
                     FROM operation_receipts
                     WHERE subject = ? AND operation_id = ?
@@ -143,7 +164,8 @@ class SqliteReceiptRepository:
         return OperationReceipt(
             subject=str(row["subject"]),
             family_id=str(row["family_id"]),
-            list_id=str(row["list_id"]),
+            resource_id=str(row["resource_id"]),
+            action=row["action"],  # type: ignore[arg-type]
             operation_id=str(row["operation_id"]),
             payload_hash=str(row["payload_hash"]),
             status=row["status"],  # type: ignore[arg-type]
@@ -174,12 +196,13 @@ class SqliteReceiptRepository:
                 conn.execute(
                     """
                     INSERT INTO operation_receipts
-                    (subject, operation_id, family_id, list_id, payload_hash,
+                    (subject, operation_id, family_id, resource_id, action, payload_hash,
                      status, upstream_id, expires_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(subject, operation_id) DO UPDATE SET
                         family_id = excluded.family_id,
-                        list_id = excluded.list_id,
+                        resource_id = excluded.resource_id,
+                        action = excluded.action,
                         payload_hash = excluded.payload_hash,
                         status = excluded.status,
                         upstream_id = excluded.upstream_id,
@@ -189,7 +212,8 @@ class SqliteReceiptRepository:
                         receipt.subject,
                         receipt.operation_id,
                         receipt.family_id,
-                        receipt.list_id,
+                        receipt.resource_id,
+                        receipt.action,
                         receipt.payload_hash,
                         receipt.status,
                         receipt.upstream_id,
@@ -241,6 +265,42 @@ class SqliteReceiptRepository:
         per operation. Included for protocol compatibility.
         """
         pass
+
+
+def _migrate_legacy_table(conn: sqlite3.Connection) -> None:
+    """Rebuild ``operation_receipts`` onto the new schema, in one transaction.
+
+    Runs as ``BEGIN IMMEDIATE`` ... ``COMMIT``: create the new table, copy every
+    row across (``list_id`` becomes ``resource_id``, ``action`` is set to
+    ``'legacy'``), drop the old table, then rename. On any error the whole
+    transaction is rolled back and the exception re-raised, so the legacy
+    table and its rows are left exactly as they were.
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # Re-check under the write lock: another process may have migrated the
+        # table between the caller's schema check and this BEGIN.
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(operation_receipts)")}
+        if "list_id" not in columns:
+            conn.commit()
+            return
+        conn.execute(_MIGRATION_TABLE_DDL)
+        conn.execute(
+            """
+            INSERT INTO operation_receipts_new
+            (subject, operation_id, family_id, resource_id, action, payload_hash,
+             status, upstream_id, expires_at)
+            SELECT subject, operation_id, family_id, list_id, 'legacy', payload_hash,
+                   status, upstream_id, expires_at
+            FROM operation_receipts
+            """
+        )
+        conn.execute("DROP TABLE operation_receipts")
+        conn.execute("ALTER TABLE operation_receipts_new RENAME TO operation_receipts")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 class _DefaultClock:
