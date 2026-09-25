@@ -10,8 +10,8 @@ gate, file boundary, acceptance criteria and who should implement it under the
 | Brief step | State | Where |
 | --- | --- | --- |
 | 1. Wire contracts | **Done** — probe A1 (calendar) and probe A2 (lists), both 2026-09-25 | [calendar](../contracts/calendar.md#mutations), [lists](../contracts/familywall.md#probe-a2--list-assignment-and-the-2-endpoints-2026-09-25) |
-| 2. Member resolver | Not started | — |
-| 3. Read models | Not started. Live reads already show `attendeeIds`, `attendees`, `toAll` and `editable` on events, and `assignee`, `assigneeIds` and `toAll` on tasks | contracts |
+| 2. Member resolver | **Done** — slice B, offline, 2026-09-25 | [handoff](../handoffs/09b-member-resolver.md) |
+| 3. Read models | **Done** — slice B, offline, 2026-09-25. Live reads already show `attendeeIds`, `attendees`, `toAll` and `editable` on events, and `assignee`, `assigneeIds` and `toAll` on tasks | [handoff](../handoffs/09b-member-resolver.md), contracts |
 | 4. List assignment | Not started | — |
 | 5. Generalized receipts | Not started. `create_calendar_event` reuses `OperationReceipt` with the calendar ID in `list_id`, and tags its payload hash with the endpoint so a key reused across tools conflicts | [handoff 10](../handoffs/10-create-calendar-event.md) |
 | 6. Calendar attendees | **Create, self-only, done** (`create_calendar_event`). Attendee selection and `set_calendar_event_attendees` are not started | PR #9 |
@@ -57,7 +57,7 @@ gate, file boundary, acceptance criteria and who should implement it under the
 | --- | --- | --- | --- |
 | A1 | Calendar attendee and `evtupdate` evidence | an owner sign-in | **done 2026-09-25** |
 | A2 | List assignment and update evidence | an owner sign-in | **done 2026-09-25** |
-| B | Member resolver, `list_family_members`, assignment read models | — | now (offline) |
+| B | Member resolver, `list_family_members`, assignment read models | — | **done 2026-09-25** |
 | D | Generalized receipts and migration | — | now (offline) |
 | C | Attendees on `create_calendar_event`, default everyone | A1, B | after A1 and B |
 | E | `set_calendar_event_attendees` | A1, B, D | after those |
@@ -175,6 +175,16 @@ Clean up by `taskdelete`, which is already verified.
 **Implementer:** cheap agent. Lead reviews name resolution and tenant isolation.
 **Offline** (synthetic fixtures only).
 
+**Status: done 2026-09-25.** Implemented per the bounded brief
+[09b-member-resolver.md](09b-member-resolver.md), which is the binding spec for
+this slice and tightens one point below: error messages and recovery text are
+**static** and never include the input or any member's display name (not even
+the candidates), to keep family data out of logs and prompts. The hosted
+discovery-refresh-on-unknown-name behaviour is explicitly out of scope for this
+slice (it belongs to slice C, once names are first used for a write); this
+slice's `resolve_members` only ever sees the cached discovery it is given. See
+[handoff 09b](../handoffs/09b-member-resolver.md) for full acceptance evidence.
+
 Files: new `services/members.py`; `familywall/calendar.py` and
 `familywall/lists.py` (parsing only); `tools/registry.py`; their tests.
 
@@ -188,11 +198,12 @@ Files: new `services/members.py`; `familywall/calendar.py` and
   - An exact full display name wins; otherwise accept an exact first name only
     if it is unique.
   - De-duplicate by account ID, preserving order.
-  - An unknown or ambiguous name raises a safe error naming the candidates by
-    display name only.
+  - An unknown or ambiguous name raises a safe error with a static message and
+    recovery text (never the input or any member's name — see status note
+    above).
   - No fuzzy or substring matching.
-- In hosted mode, discovery is cached per subject, so a new member would look
-  unknown. On an unknown name, refresh discovery once (a read) before failing.
+- Hosted discovery refresh on an unknown name is deferred to slice C (status
+  note above).
 - A new read-only tool, `list_family_members`, returns display names, first
   names and which one is you. It never returns account IDs.
 - Read models:
@@ -203,11 +214,11 @@ Files: new `services/members.py`; `familywall/calendar.py` and
     `unresolved_members: int`, never raw IDs.
 
 **Acceptance:**
-- [ ] Tests cover normalisation, full-name precedence, unique and ambiguous
+- [x] Tests cover normalisation, full-name precedence, unique and ambiguous
   first names, duplicates, unknown names, `None` and `[]` meaning everyone, and
   a name from another family never resolving.
-- [ ] No tool schema accepts or returns an account ID.
-- [ ] Existing read outputs gain fields without losing any.
+- [x] No tool schema accepts or returns an account ID.
+- [x] Existing read outputs gain fields without losing any.
 
 ## Slice C — Attendees on `create_calendar_event`
 

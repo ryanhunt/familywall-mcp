@@ -7,6 +7,10 @@ from datetime import UTC
 import pytest
 from pydantic import ValidationError
 from tests.support.list_fixtures import (
+    list_item_with_assignment_fields,
+    list_item_with_malformed_assignee_ids,
+    list_item_with_malformed_to_all,
+    list_item_without_assignment_fields,
     list_items_bare_array,
     list_items_with_malformed_entry,
     list_items_wrapped_items,
@@ -588,3 +592,44 @@ class TestParsedItemsResult:
         assert result.skipped == 0
         assert hasattr(result, "items")
         assert hasattr(result, "skipped")
+
+
+class TestAssignmentFields:
+    """T16: assignee_ids and to_all parse; absent fields default; each malformed
+    case skips the item."""
+
+    def test_t16_assignment_fields_parse(self) -> None:
+        """Present assigneeIds and toAll both parse onto the item."""
+        payload = [list_item_with_assignment_fields()]
+        result = parse_list_items(payload)
+
+        assert result.skipped == 0
+        item = result.items[0]
+        assert item.assignee_ids == ("acc-alice", "acc-bob")
+        assert item.to_all is False
+
+    def test_t16_absent_assignment_fields_give_defaults(self) -> None:
+        """An item with neither field defaults to () / None."""
+        payload = [list_item_without_assignment_fields()]
+        result = parse_list_items(payload)
+
+        assert result.skipped == 0
+        item = result.items[0]
+        assert item.assignee_ids == ()
+        assert item.to_all is None
+
+    def test_t16_malformed_assignee_ids_skips_item(self) -> None:
+        """assigneeIds containing a non-string entry skips the item."""
+        payload = [list_item_with_malformed_assignee_ids()]
+        result = parse_list_items(payload)
+
+        assert len(result.items) == 0
+        assert result.skipped == 1
+
+    def test_t16_malformed_to_all_skips_item(self) -> None:
+        """toAll: "maybe" skips the item."""
+        payload = [list_item_with_malformed_to_all()]
+        result = parse_list_items(payload)
+
+        assert len(result.items) == 0
+        assert result.skipped == 1

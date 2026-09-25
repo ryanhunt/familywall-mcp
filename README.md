@@ -20,14 +20,15 @@ HTTPS — see [Known limitations](#known-limitations) and
 
 ## What it does
 
-Seven MCP tools are exposed today:
+Eight MCP tools are exposed today:
 
 | Tool | Type | Description |
 | --- | --- | --- |
 | `get_connection_status` | read | Connection state, family name, member count, resolved timezone, whether writes are enabled |
 | `list_shopping_lists` | read | Every shopping/todo list accessible to the authenticated member |
-| `get_list_items` | read | Items in a specific list, with checked state |
-| `get_week_overview` | read | A timezone-aware week of calendar events (Monday- or Sunday-start), with recurrence already expanded |
+| `get_list_items` | read | Items in a specific list, with checked state and who it's assigned to |
+| `get_week_overview` | read | A timezone-aware week of calendar events (Monday- or Sunday-start), with recurrence already expanded, and who each event is assigned to |
+| `list_family_members` | read | The family's members by display name and first name, and which one is you (never account IDs) |
 | `add_list_item` | write | Add an item to a list, with an idempotency key so retries don't create duplicates |
 | `set_list_item_checked` | write | Mark a list item checked or unchecked (explicit target state, not a toggle) |
 | `create_calendar_event` | write | Add a timed, one-off event to the family calendar, assigned to you, and confirm it by reading it back |
@@ -51,6 +52,10 @@ A few things worth knowing about how these behave:
   request exactly; `mismatched` means the event exists but differs.
 - There is no delete or move tool yet, and item `quantity` cannot be read back
   (FamilyWall's API doesn't return it).
+- **Assignment is shown by name, never by account ID.** `get_week_overview` and
+  `get_list_items` report `assigned_to` (names), `assigned_to_everyone`, and an
+  `unresolved_members` count; `list_family_members` is how you learn the exact
+  names to use. No tool accepts or returns a raw account ID.
 
 See [docs/architecture.md](docs/architecture.md) for the full tool contract
 and the service rules (list selection, receipt semantics, timezone handling)

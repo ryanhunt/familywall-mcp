@@ -8,6 +8,7 @@ import pytest
 
 from familywall_mcp.config import AppConfig
 from familywall_mcp.errors import UpstreamRejectedError
+from familywall_mcp.familywall.calendar import CalendarEvent, TimedSpan
 from familywall_mcp.familywall.discovery import DiscoveredFamily, FamilyMember
 from familywall_mcp.models import FamilyContext, Principal
 from familywall_mcp.services.principal_context import FixedContextResolver, PrincipalContext
@@ -15,6 +16,8 @@ from familywall_mcp.storage.memory import InMemoryReceiptRepository
 from familywall_mcp.tools.registry import (
     CreateCalendarEventResponse,
     ErrorResponse,
+    GetListItemsResponse,
+    ListFamilyMembersResponse,
     ToolRegistry,
 )
 
@@ -635,3 +638,178 @@ async def test_create_calendar_event_is_registered_as_a_write_tool() -> None:
     assert tool.annotations is not None
     assert tool.annotations.read_only_hint is False
     assert tool.input_schema["required"] == ["title", "start", "end"]
+
+
+@pytest.mark.asyncio
+async def test_t17_list_family_members_zero_calls_is_you_and_no_account_id() -> None:
+    """T17: list_family_members makes zero pool calls, reports is_you correctly, and
+    never leaks an account ID in its serialised response."""
+    config = AppConfig.from_env(
+        {
+            "FAMILYWALL_LOCAL_SUBJECT": "test-local-user",
+            "FAMILYWALL_MODE": "stdio",
+        }
+    )
+    discovered = create_discovered_family()
+    registry, pool = create_registry(config, discovered)
+
+    result = await registry._list_family_members()
+
+    assert isinstance(result, ListFamilyMembersResponse)
+    assert result.family_name == "The Test Family"
+    assert len(pool.calls) == 0
+
+    assert [m.display_name for m in result.members] == ["Test Member", "Other Member"]
+    assert [m.first_name for m in result.members] == ["Test", "Other"]
+    assert [m.is_you for m in result.members] == [True, False]
+
+    serialised = result.model_dump_json()
+    assert "acct/1" not in serialised
+    assert "acct/2" not in serialised
+
+
+def _synthetic_event(attendee_ids: tuple[str, ...], to_all: bool | None) -> CalendarEvent:
+    """A synthetic timed event carrying only the assignment fields under test."""
+    return CalendarEvent(
+        occurrence_id="event/synthetic-1",
+        series_id="event/synthetic-1",
+        occurrence_index=0,
+        title="Family dinner",
+        span=TimedSpan(
+            start=datetime(2026, 9, 14, 18, 0, tzinfo=UTC),
+            end=datetime(2026, 9, 14, 19, 0, tzinfo=UTC),
+        ),
+        raw_start="2026-09-14T18:00:00.000Z",
+        raw_end="2026-09-14T19:00:00.000Z",
+        event_type="UNKNOWN",
+        calendar_id="calendar/1",
+        event_timezone="Australia/Sydney",
+        location=None,
+        description=None,
+        recurrence_rule=None,
+        is_recurring=False,
+        is_series_exception=False,
+        attendee_ids=attendee_ids,
+        to_all=to_all,
+        editable=True,
+    )
+
+
+class FakeCalendarServiceWithEvent(FakeCalendarService):
+    """A FakeCalendarService whose week overview carries one synthetic event."""
+
+    def __init__(self, event: CalendarEvent) -> None:
+        self._event = event
+
+    async def get_week_overview(
+        self,
+        reference_date: object,
+        timezone: str,
+        calendar_id: str,
+        week_starts_on: str = "monday",
+    ) -> object:
+        from familywall_mcp.services.calendar import DayAgenda, WeekOverview
+
+        today = date.today()
+        days = tuple(
+            DayAgenda(day=today, events=(self._event,) if index == 0 else ()) for index in range(7)
+        )
+        return WeekOverview(
+            range_start=datetime.now(tz=UTC),
+            range_end=datetime.now(tz=UTC),
+            timezone=timezone,
+            days=days,
+            total_events=1,
+            complete=True,
+            notes=(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_t18_get_week_overview_maps_assignment_to_names_and_counts_unresolved() -> None:
+    """T18: get_week_overview event entries map attendee IDs to names, pass through the
+    everyone flag, count unresolved IDs, and never leak an account ID."""
+    config = AppConfig.from_env(
+        {"FAMILYWALL_LOCAL_SUBJECT": "test-local-user", "FAMILYWALL_MODE": "stdio"}
+    )
+    discovered = create_discovered_family()
+    event = _synthetic_event(attendee_ids=("acct/1", "acct/unknown"), to_all=False)
+
+    pool = FakeSessionPool()
+    principal = Principal(subject="test-subject")
+    family_context = FamilyContext(
+        account_id="acct/1", family_id="family/1", calendar_id="calendar/1"
+    )
+    registry = ToolRegistry(
+        config=config,
+        session_pool=pool,  # type: ignore
+        context_resolver=FixedContextResolver(
+            principal,
+            PrincipalContext(
+                family_context=family_context,
+                discovered_family=discovered,
+                authenticated_member_timezone="Australia/Sydney",
+                calendar_service=FakeCalendarServiceWithEvent(event),  # type: ignore[arg-type]
+            ),
+        ),
+        receipt_repository=InMemoryReceiptRepository(),
+    )
+
+    result = await registry._get_week_overview(reference_date=None, timezone=None)
+
+    day_with_event = next(day for day in result.days if day["events"])
+    event_view = day_with_event["events"][0]
+    assert event_view["assigned_to"] == ["Test Member"]
+    assert event_view["assigned_to_everyone"] is False
+    assert event_view["unresolved_members"] == 1
+
+    serialised = result.model_dump_json()
+    assert "acct/1" not in serialised
+    assert "acct/unknown" not in serialised
+
+
+class FakeSessionPoolWithAssignedItem(FakeSessionPool):
+    """A FakeSessionPool whose tasklist response carries one assigned item."""
+
+    async def call(
+        self, principal: Principal, endpoint: str, fields: dict[str, str], read_write: str
+    ) -> object:
+        if endpoint == "tasklist":
+            self.calls.append((principal.subject, endpoint, fields, read_write))
+            return {
+                "listItems": [
+                    {
+                        "metaId": "task/501",
+                        "taskListId": fields.get("a00listId", "taskList/1"),
+                        "text": "Pack lunch",
+                        "complete": "false",
+                        "assigneeIds": ["acct/1", "acct/unknown"],
+                        "toAll": "false",
+                    }
+                ]
+            }
+        return await super().call(principal, endpoint, fields, read_write)
+
+
+@pytest.mark.asyncio
+async def test_t18_get_list_items_maps_assignment_to_names_and_counts_unresolved() -> None:
+    """T18: get_list_items items map assignee IDs to names, pass through the everyone
+    flag, count unresolved IDs, and never leak an account ID."""
+    config = AppConfig.from_env(
+        {"FAMILYWALL_LOCAL_SUBJECT": "test-local-user", "FAMILYWALL_MODE": "stdio"}
+    )
+    discovered = create_discovered_family()
+    registry, _pool = create_registry(config, discovered)
+    registry._session_pool = FakeSessionPoolWithAssignedItem()  # type: ignore[assignment]
+
+    result = await registry._get_list_items("taskList/1")
+
+    assert isinstance(result, GetListItemsResponse)
+    item = result.items[0]
+    assert item.assigned_to == ("Test Member",)
+    assert item.assigned_to_everyone is False
+    assert item.unresolved_members == 1
+
+    serialised = result.model_dump_json()
+    assert "acct/1" not in serialised
+    assert "acct/unknown" not in serialised

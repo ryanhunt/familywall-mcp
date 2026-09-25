@@ -177,7 +177,7 @@ def list_items_bare_array() -> list[dict[str, object]]:
             "reminder": None,
             "sortingIndex": 0,
             "taskCategoryId": None,
-            "toAll": False,
+            "toAll": "false",
         },
         {
             "metaId": "task/202",
@@ -209,7 +209,7 @@ def list_items_bare_array() -> list[dict[str, object]]:
             "reminder": None,
             "sortingIndex": 1,
             "taskCategoryId": None,
-            "toAll": False,
+            "toAll": "false",
         },
         {
             "metaId": "task/203",
@@ -244,7 +244,7 @@ def list_items_bare_array() -> list[dict[str, object]]:
             "reminder": None,
             "sortingIndex": 2,
             "taskCategoryId": None,
-            "toAll": False,
+            "toAll": "false",
         },
         {
             "metaId": "task/204",
@@ -276,7 +276,7 @@ def list_items_bare_array() -> list[dict[str, object]]:
             "reminder": None,
             "sortingIndex": 3,
             "taskCategoryId": None,
-            "toAll": False,
+            "toAll": "false",
         },
     ]
 
@@ -294,6 +294,50 @@ def list_items_wrapped_tasks() -> dict[str, object]:
 def list_items_wrapped_listItems() -> dict[str, object]:
     """Items wrapped under 'listItems' key."""
     return {"listItems": list_items_bare_array()}
+
+
+def list_item_with_assignment_fields() -> dict[str, object]:
+    """An item with assigneeIds and toAll both present."""
+    return {
+        "metaId": "task/301",
+        "taskListId": "taskList/101",
+        "text": "Pack lunch",
+        "complete": "false",
+        "assigneeIds": ["acc-alice", "acc-bob"],
+        "toAll": "false",
+    }
+
+
+def list_item_without_assignment_fields() -> dict[str, object]:
+    """An item with neither assigneeIds nor toAll present."""
+    return {
+        "metaId": "task/302",
+        "taskListId": "taskList/101",
+        "text": "Water the plants",
+        "complete": "false",
+    }
+
+
+def list_item_with_malformed_assignee_ids() -> dict[str, object]:
+    """An item whose assigneeIds is not a list of strings."""
+    return {
+        "metaId": "task/303",
+        "taskListId": "taskList/101",
+        "text": "Bad assignees",
+        "complete": "false",
+        "assigneeIds": ["acc-alice", 7],
+    }
+
+
+def list_item_with_malformed_to_all() -> dict[str, object]:
+    """An item whose toAll is neither "true" nor "false"."""
+    return {
+        "metaId": "task/304",
+        "taskListId": "taskList/101",
+        "text": "Bad toAll",
+        "complete": "false",
+        "toAll": "maybe",
+    }
 
 
 def list_items_with_malformed_entry() -> list[dict[str, object]]:
