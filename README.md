@@ -20,7 +20,7 @@ HTTPS — see [Known limitations](#known-limitations) and
 
 ## What it does
 
-Nine MCP tools are exposed today:
+Ten MCP tools are exposed today:
 
 | Tool | Type | Description |
 | --- | --- | --- |
@@ -29,22 +29,38 @@ Nine MCP tools are exposed today:
 | `get_list_items` | read | Items in a specific list, with checked state and who it's assigned to |
 | `get_week_overview` | read | A timezone-aware week of calendar events (Monday- or Sunday-start), with recurrence already expanded, and who each event is assigned to |
 | `list_family_members` | read | The family's members by display name and first name, and which one is you (never account IDs) |
-| `add_list_item` | write | Add an item to a list, with an idempotency key so retries don't create duplicates |
+| `add_list_item` | write | Add an item to a list, assigned to everyone or to named members in the same call, with an idempotency key so retries don't create duplicates |
 | `set_list_item_checked` | write | Mark a list item checked or unchecked (explicit target state, not a toggle) |
+| `set_list_item_assignees` | write | Change only who an existing list item is assigned to; nothing else about the item changes |
 | `create_calendar_event` | write | Add a timed, one-off event to the family calendar, assigned to everyone or to named members, and confirm it by reading it back |
 | `set_calendar_event_attendees` | write | Change only who an existing, ordinary, one-off, timed family-calendar event is assigned to, and confirm nothing else about it changed |
 
 A few things worth knowing about how these behave:
 
 - **Writes are off by default.** `add_list_item`, `set_list_item_checked`,
-  `create_calendar_event` and `set_calendar_event_attendees` stay listed but
-  refuse before making any upstream request until
-  `FAMILYWALL_ENABLE_WRITES=true` is set deliberately.
+  `set_list_item_assignees`, `create_calendar_event` and
+  `set_calendar_event_attendees` stay listed but refuse before making any
+  upstream request until `FAMILYWALL_ENABLE_WRITES=true` is set deliberately.
 - **Mutations are idempotent.** Every write takes (or generates) an
   `idempotency_key`; a durable SQLite receipt records the outcome so a retried
   call returns the original result instead of creating a duplicate.
 - **`get_week_overview` covers calendar events only** — not meals, budgets or
   undated tasks.
+- **`add_list_item` creates the item directly in the chosen list, already
+  assigned, in one call.** `assigned_to` takes member names exactly as
+  `list_family_members` shows them; omit it, or pass an empty list, to assign
+  everyone. An unknown name triggers one refresh of the cached family list
+  before failing. There is no separate move step any more (see
+  [ADR 0003](docs/decisions/0003-single-call-add.md)); the outcome is
+  `confirmed` only when a readback of the requested list finds the item with
+  exactly the requested assignment. `misfiled` (the item landed in a list
+  other than the one requested) and `mismatched` (the assignment differs) are
+  both reported, never silently retried or corrected.
+- **`set_list_item_assignees` changes only the assignment.** It verifies the
+  item belongs to an accessible list before writing (the underlying endpoint
+  carries no list ID, so this server enforces that check itself), sends one
+  partial update, and confirms by reading the item back: any field other than
+  the assignment that changed is reported as `mismatched`, naming it.
 - **`create_calendar_event` is deliberately narrow.** It creates one timed,
   non-recurring event. `assigned_to` takes member names exactly as
   `list_family_members` shows them; omit it, or pass an empty list, to assign

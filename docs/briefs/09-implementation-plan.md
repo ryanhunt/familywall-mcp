@@ -12,7 +12,7 @@ gate, file boundary, acceptance criteria and who should implement it under the
 | 1. Wire contracts | **Done** — probe A1 (calendar) and probe A2 (lists), both 2026-09-25 | [calendar](../contracts/calendar.md#mutations), [lists](../contracts/familywall.md#probe-a2--list-assignment-and-the-2-endpoints-2026-09-25) |
 | 2. Member resolver | **Done** — slice B, offline, 2026-09-25 | [handoff](../handoffs/09b-member-resolver.md) |
 | 3. Read models | **Done** — slice B, offline, 2026-09-25. Live reads already show `attendeeIds`, `attendees`, `toAll` and `editable` on events, and `assignee`, `assigneeIds` and `toAll` on tasks | [handoff](../handoffs/09b-member-resolver.md), contracts |
-| 4. List assignment | Not started | — |
+| 4. List assignment | **Done** — slice F, offline, 2026-09-25 | [handoff](../handoffs/09f-list-assignment.md) |
 | 5. Generalized receipts | **Done** (slice D, offline). `OperationReceipt.list_id` is now `resource_id` with an `action` field and a `rejected` status; legacy SQLite databases migrate in place | [handoff 09d](../handoffs/09d-receipts-migration.md) |
 | 6. Calendar attendees | **Done.** Create with `assigned_to`, default everyone (`create_calendar_event`, slice C, offline 2026-09-25); `set_calendar_event_attendees` (editing an existing event's attendees only, slice E, offline 2026-09-25) | PR #9; [handoff 09c](../handoffs/09c-calendar-attendees.md), [handoff 09e](../handoffs/09e-set-event-attendees.md) |
 
@@ -57,8 +57,11 @@ gate, file boundary, acceptance criteria and who should implement it under the
    9:00 am on the day).
 5. **`add_list_item` switches to a single `taskcreate2`.** Slice F replaces
    create-then-move with one `taskcreate2` carrying the target list and the
-   assignment (probe A2). The `misfiled` outcome goes away, and a new ADR
-   supersedes ADR 0002.
+   assignment (probe A2), and a new ADR (0003) supersedes ADR 0002.
+   **Correction, as implemented:** `misfiled` does not go away — there is no
+   longer a move to fail, but the create response can still name a list other
+   than the one requested, so `misfiled` stays as a detected-only outcome. See
+   slice F's status note below.
 
 ## Slice order
 
@@ -70,7 +73,7 @@ gate, file boundary, acceptance criteria and who should implement it under the
 | D | Generalized receipts and migration | — | **done 2026-09-25** |
 | C | Attendees on `create_calendar_event`, default everyone | A1, B | **done 2026-09-25**, offline |
 | E | `set_calendar_event_attendees` | A1, B, D | **done 2026-09-25**, offline |
-| F | List assignment, single-call `taskcreate2` add, `set_list_item_assignees` | A2, B, D | after those |
+| F | List assignment, single-call `taskcreate2` add, `set_list_item_assignees` | A2, B, D | **done 2026-09-25**, offline |
 | G | Live acceptance and docs | each slice | per slice |
 
 Each slice is one PR. B and D can run in parallel with the probes.
@@ -148,8 +151,11 @@ favour F:
 - **`taskmove` keeps the assignment.**
 - **`taskcreate2` takes a `taskListId` and an assignment**, and created an item
   directly in a non-default list with that assignee, in one call. F can replace
-  create-then-move with a single create. That removes the `misfiled` outcome,
-  and supersedes ADR 0002 (a new ADR in slice F).
+  create-then-move with a single create, superseding ADR 0002 (ADR 0003, in
+  slice F). **Correction, as implemented:** this does not remove the
+  `misfiled` outcome — there is no longer a move to fail, but the create
+  response can still name a list other than the one requested, so `misfiled`
+  stays as a detected-only outcome (see slice F's status note).
 - **Everyone** is `toAll=true` plus `assignee.N` for every member (what the web
   app sends). It reads back as `toAll:"true"` with every member listed, so
   compare as a set.
@@ -361,15 +367,38 @@ Files: `familywall/calendar.py` (update builder), `services/calendar.py`,
 
 ## Slice F — List assignment
 
+**Status: done 2026-09-25, offline.** Implemented per the more detailed
+bounded brief [09f-list-assignment.md](09f-list-assignment.md), which is the
+binding spec for this slice and corrects two points below (see
+[handoff 09f](../handoffs/09f-list-assignment.md) for full acceptance
+evidence, F1–F14):
+
+- **`misfiled` does not go away; its cause narrows.** This plan's summary
+  above ("drop the move step, and with it the `misfiled` outcome") turned out
+  to describe the mechanism, not the outcome vocabulary. There is no longer a
+  move to fail, but the create response can still name a list other than the
+  one requested (an upstream inconsistency), so `misfiled` stays as a
+  **detected-only** outcome, with no move and no compensation attempted. A
+  new `mismatched` outcome (not anticipated by this plan) reports a readback
+  assignment that differs from the request, for both `add_list_item` and
+  `set_list_item_assignees`.
+- **The existing create-then-move tests were updated or removed, not kept
+  passing as-is.** `add_item`'s signature changed (it now takes a resolved
+  assignment), so every old test that called it directly needed rewriting
+  regardless; ADR 0003 records why the create-then-move behaviour itself is
+  gone. No test asserting a `taskmove` from `add_list_item` remains (brief
+  09F's F14).
+
 **Implementer:** cheap agent after A2 and B. Lead reviews, including the new
 ADR.
 
-Files: `familywall/lists.py`, `services/lists.py`, `tools/registry.py`, tests.
+Files: `familywall/lists.py`, `services/lists.py`, `models.py`,
+`tools/registry.py`, tests.
 
 - `add_list_item` gains `assigned_to` (blank means everyone).
   - Switch to a single `taskcreate2` with the target `taskListId`, `toAll` and
-    `assignee.N` (A2). Drop the move step, and with it the `misfiled` outcome.
-    Record the change in an ADR superseding ADR 0002.
+    `assignee.N` (A2). Drop the move step. Record the change in
+    [ADR 0003](../decisions/0003-single-call-add.md), superseding ADR 0002.
   - `confirmed` needs the right list *and* the right assignment, compared as a
     set.
 - `set_list_item_assignees` (A2 go): verify list membership first (as
@@ -378,10 +407,11 @@ Files: `familywall/lists.py`, `services/lists.py`, `tools/registry.py`, tests.
   to be unchanged.
 
 **Acceptance:**
-- [ ] The resolved assignment is part of the payload hash, and the existing
-  create-then-move tests still pass.
-- [ ] Zero calls with writes disabled or with an invalid or ambiguous name.
-- [ ] Tests cover readback mismatch, replay and conflict.
+- [x] The resolved assignment is part of the payload hash, and the existing
+  create-then-move tests were updated or removed to match ADR 0003 (see
+  status note above).
+- [x] Zero calls with writes disabled or with an invalid or ambiguous name.
+- [x] Tests cover readback mismatch, replay and conflict.
 
 ## Slice G — Live acceptance and documentation
 

@@ -116,6 +116,11 @@ class AddListItemResponse(DomainModel):
     actual_list_id: str | None = None  # where the item actually is
     # Populated if and only if outcome is misfiled:
     requested_list_id: str | None = None  # where it was supposed to go
+    assigned_to: tuple[str, ...] = ()
+    """Display names only, never account IDs; every member's name for everyone."""
+    assigned_to_everyone: bool = False
+    # Populated if and only if outcome is mismatched:
+    mismatched_fields: tuple[str, ...] = ()
 
 
 class SetListItemCheckedResponse(DomainModel):
@@ -123,6 +128,19 @@ class SetListItemCheckedResponse(DomainModel):
 
     family_name: str
     outcome: str
+
+
+class SetListItemAssigneesResponse(DomainModel):
+    """Response from set_list_item_assignees."""
+
+    family_name: str
+    outcome: str
+    item_id: str
+    assigned_to: tuple[str, ...]
+    """Display names only, never account IDs; every member's name for everyone."""
+    assigned_to_everyone: bool
+    # Populated if and only if outcome is mismatched:
+    mismatched_fields: tuple[str, ...] = ()
 
 
 class CreateCalendarEventResponse(DomainModel):
@@ -243,8 +261,10 @@ class ToolRegistry:
         server.tool(
             name="add_list_item",
             description=(
-                "Add an item to a shopping list. Without idempotency_key, retries "
-                "will create duplicate items."
+                "Add an item to a shopping list, assigned per assigned_to (member "
+                "names exactly as list_family_members shows them; omit it, or pass "
+                "an empty list, to assign everyone). Without idempotency_key, "
+                "retries will create duplicate items."
             ),
             annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
         )(self._add_list_item)
@@ -254,6 +274,19 @@ class ToolRegistry:
             description="Mark a list item as checked or unchecked.",
             annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
         )(self._set_list_item_checked)
+
+        server.tool(
+            name="set_list_item_assignees",
+            description=(
+                "Change only who an existing list item is assigned to. assigned_to "
+                "takes member names exactly as list_family_members shows them; omit "
+                "it, or pass an empty list, to assign everyone. Nothing else about "
+                "the item (its text, description, checked state, list, due date or "
+                "reminder) is touched. Without idempotency_key, a retry simply "
+                "resends the same assignment."
+            ),
+            annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
+        )(self._set_list_item_assignees)
 
         server.tool(
             name="create_calendar_event",
@@ -442,20 +475,27 @@ class ToolRegistry:
         self,
         text: str,
         list_id: str | None = None,
+        assigned_to: list[str] | None = None,
         idempotency_key: str | None = None,
     ) -> AddListItemResponse | ErrorResponse:
-        """Add an item to a list (via create-then-move).
+        """Add an item directly to a list in one taskcreate2 call, assigned per
+        ``assigned_to``.
 
-        Creates the item in the default list, then moves it to the requested list if needed.
-        The operation is non-atomic: if create succeeds but move fails, the item exists in
-        the default list and a 'misfiled' outcome is returned. No automatic retry or delete
-        is performed.
+        Superseded create-then-move (ADR 0002; see ADR 0003): a single
+        taskcreate2 carries the target list and the assignment, so no taskmove
+        is ever sent. ``misfiled`` remains only as a detected outcome, when the
+        create response itself names a different list.
 
-        If writes are disabled, returns an error response with zero upstream calls.
+        If writes are disabled, returns an error response with zero upstream
+        calls. ``assigned_to`` is resolved against the cached family discovery
+        (refreshing once on an unknown name) before list selection, any receipt
+        or any write.
 
         Args:
             text: The item text.
             list_id: Optional list ID to add to; if not provided, uses default or only list.
+            assigned_to: Member names to assign, exactly as list_family_members shows
+                them. ``None`` or ``[]`` means everyone.
             idempotency_key: Optional operation ID for idempotency; generates UUID if not provided.
 
         Returns:
@@ -471,6 +511,8 @@ class ToolRegistry:
 
         try:
             principal, ctx = await self._context_resolver.resolve()
+            principal, ctx, assignment = await self._resolve_assignment(principal, ctx, assigned_to)
+
             transport = write_transport(self._session_pool, principal)
             service = ListService(transport)
 
@@ -492,6 +534,7 @@ class ToolRegistry:
                 principal,
                 selection.resolved.list_id,
                 text,
+                assignment,
                 operation_id,
                 self._receipt_repository,
                 ctx.family_context.family_id,
@@ -503,6 +546,9 @@ class ToolRegistry:
                 item_id=result.item_id,
                 actual_list_id=result.actual_list_id,
                 requested_list_id=result.requested_list_id,
+                assigned_to=assignment.display_names,
+                assigned_to_everyone=assignment.to_all,
+                mismatched_fields=result.mismatched_fields,
             )
         except FamilyWallError as exc:
             return ErrorResponse(
@@ -558,6 +604,72 @@ class ToolRegistry:
             return SetListItemCheckedResponse(
                 family_name=ctx.discovered_family.name,
                 outcome=result.outcome.value,
+            )
+        except FamilyWallError as exc:
+            return ErrorResponse(
+                error_code=exc.info.code,
+                error_message=exc.info.message,
+                error_recovery=exc.info.recovery,
+            )
+
+    async def _set_list_item_assignees(
+        self,
+        item_id: str,
+        assigned_to: list[str] | None = None,
+        idempotency_key: str | None = None,
+    ) -> SetListItemAssigneesResponse | ErrorResponse:
+        """Change only who ``item_id`` is assigned to.
+
+        Verifies the item belongs to an accessible list before writing (a
+        security requirement: the underlying endpoint sends no list ID, so the
+        server cannot enforce list membership). Nothing else about the item is
+        touched. If writes are disabled, returns an error response with zero
+        upstream calls. ``assigned_to`` is resolved against the cached family
+        discovery (refreshing once on an unknown name) before any write.
+
+        Args:
+            item_id: The item metaId (task/...).
+            assigned_to: Member names to assign, exactly as list_family_members shows
+                them. ``None`` or ``[]`` means everyone.
+            idempotency_key: Optional operation ID for idempotency; generates UUID if not provided.
+
+        Returns:
+            SetListItemAssigneesResponse on success, or ErrorResponse on failure.
+        """
+        # Write gate: check if writes are enabled BEFORE any upstream call
+        if not self._config.enable_writes:
+            return ErrorResponse(
+                error_code="writes_disabled",
+                error_message="Write operations are disabled.",
+                error_recovery="Set FAMILYWALL_ENABLE_WRITES=true to enable writes.",
+            )
+
+        try:
+            principal, ctx = await self._context_resolver.resolve()
+            principal, ctx, assignment = await self._resolve_assignment(principal, ctx, assigned_to)
+
+            transport = write_transport(self._session_pool, principal)
+            service = ListService(transport)
+
+            # Generate operation ID if not provided
+            operation_id = idempotency_key or str(uuid.uuid4())
+
+            result = await service.set_item_assignees(
+                principal,
+                item_id,
+                assignment,
+                operation_id,
+                self._receipt_repository,
+                ctx.family_context.family_id,
+            )
+
+            return SetListItemAssigneesResponse(
+                family_name=ctx.discovered_family.name,
+                outcome=result.outcome.value,
+                item_id=item_id,
+                assigned_to=assignment.display_names,
+                assigned_to_everyone=assignment.to_all,
+                mismatched_fields=result.mismatched_fields,
             )
         except FamilyWallError as exc:
             return ErrorResponse(

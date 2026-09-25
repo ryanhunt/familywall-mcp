@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import NamedTuple
@@ -50,6 +51,11 @@ class ListItem(DomainModel):
     """Account IDs assigned to this item (from assigneeIds); empty when absent."""
     to_all: bool | None = None
     """Whether the item is assigned to everyone (from toAll); None when absent."""
+    due_date: str | None = None
+    """The verbatim ``dueDate`` string (a UTC instant); None when absent or malformed."""
+    reminder: tuple[str, str, str] | None = None
+    """The verbatim (reminderType, reminderUnit, reminderValue) strings; None when
+    absent or malformed."""
 
 
 class ParsedItems(NamedTuple):
@@ -108,6 +114,34 @@ def _parse_iso8601_utc(value: object) -> datetime | None:
         dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
         # Ensure it's UTC
         return dt.astimezone(UTC) if dt.tzinfo else None
+    return None
+
+
+def _parse_due_date(value: object) -> str | None:
+    """Parse ``dueDate`` leniently: the verbatim string if present, else None.
+
+    Never raises: a malformed or absent due date must not skip the item.
+    """
+    return value if isinstance(value, str) and value else None
+
+
+def _parse_reminder(value: object) -> tuple[str, str, str] | None:
+    """Parse ``reminder`` leniently: the verbatim (type, unit, value) strings, or None.
+
+    Absent, non-dict, or a dict missing/mistyping any of the three fields all
+    give None. Never raises: a malformed reminder must not skip the item.
+    """
+    if not isinstance(value, dict):
+        return None
+    reminder_type = value.get("reminderType")
+    reminder_unit = value.get("reminderUnit")
+    reminder_value = value.get("reminderValue")
+    if (
+        isinstance(reminder_type, str)
+        and isinstance(reminder_unit, str)
+        and isinstance(reminder_value, str)
+    ):
+        return (reminder_type, reminder_unit, reminder_value)
     return None
 
 
@@ -316,6 +350,11 @@ def parse_list_items(payload: object) -> ParsedItems:
             to_all_raw = entry.get("toAll")
             to_all = _coerce_bool(to_all_raw) if to_all_raw is not None else None
 
+            # due_date/reminder parse leniently: absent or malformed gives None,
+            # and never raises, so a malformed value never skips the item.
+            due_date = _parse_due_date(entry.get("dueDate"))
+            reminder = _parse_reminder(entry.get("reminder"))
+
             items.append(
                 ListItem(
                     item_id=meta_id,
@@ -329,6 +368,8 @@ def parse_list_items(payload: object) -> ParsedItems:
                     completed_at=completed_at,
                     assignee_ids=assignee_ids,
                     to_all=to_all,
+                    due_date=due_date,
+                    reminder=reminder,
                 )
             )
         except MalformedPayloadError:
@@ -403,6 +444,111 @@ def build_move_item_fields(item_id: str, list_id: str) -> dict[str, str]:
         "a00taskId": item_id,
         "a00taskListId": list_id,
     }
+
+
+def build_create2_item_fields(
+    *,
+    list_id: str,
+    text: str,
+    to_all: bool,
+    assignee_account_ids: Sequence[str],
+) -> dict[str, str]:
+    """Build request fields for a taskcreate2 request: create directly in a list.
+
+    Evidence: probe A2 (2026-09-25,
+    ``docs/contracts/familywall.md#probe-a2--list-assignment-and-the-2-endpoints-2026-09-25``).
+    A scripted call with a non-default list's ``taskListId``, ``toAll=false``
+    and ``assignee.0`` created the item in that list with exactly that
+    assignee, in one call, superseding the create-then-move of ADR 0002 (see
+    ADR 0003). Everyone is ``toAll=true`` **plus** an ``assignee.N`` for every
+    member (the encoding verified on ``taskupdate2``); the same encoding on
+    ``taskcreate2`` is extrapolated, not directly observed, so the caller's
+    readback must catch it if the server disagrees.
+
+    This function only ever receives resolved account IDs, never member
+    names: name resolution happens one layer up, before any wire call.
+
+    Args:
+        list_id: The destination list's metaId (must have ``taskList/`` prefix).
+        text: Item text.
+        to_all: Whether every family member is meant. When ``True``,
+            ``assignee_account_ids`` must still list every member (the
+            everyone encoding sends both).
+        assignee_account_ids: FamilyWall account IDs to send, in order. Never
+            empty, even for ``to_all=True``.
+
+    Returns:
+        The complete taskcreate2 form fields: ``partnerScope``, ``taskListId``,
+        ``text``, ``taskCategoryId``, ``dueDate``, ``picture``, ``toAll`` and
+        ``assignee.N`` for each ID, in that order.
+
+    Raises:
+        MalformedPayloadError: If ``list_id`` has the wrong prefix.
+        ValueError: If ``assignee_account_ids`` is empty.
+    """
+    _validate_prefix(list_id, "taskList/")
+    if not assignee_account_ids:
+        raise ValueError("assignee_account_ids must not be empty")
+
+    fields: dict[str, str] = {
+        "partnerScope": "Family",
+        "taskListId": list_id,
+        "text": text,
+        "taskCategoryId": "",
+        "dueDate": "$empty",
+        "picture": "$empty",
+        "toAll": "true" if to_all else "false",
+    }
+    for index, account_id in enumerate(assignee_account_ids):
+        fields[f"assignee.{index}"] = account_id
+    return fields
+
+
+def build_update2_assignees_fields(
+    *,
+    item_id: str,
+    to_all: bool,
+    assignee_account_ids: Sequence[str],
+) -> dict[str, str]:
+    """Build request fields for a partial taskupdate2 request: assignment only.
+
+    Evidence: probe A2. A scripted call with only ``partnerScope``, ``taskId``,
+    ``toAll`` and ``assignee.N`` changed the assignment and left ``text``,
+    ``description``, ``dueDate``, the reminder and the list unchanged.
+
+    This function only ever receives resolved account IDs, never member
+    names: name resolution happens one layer up, before any wire call. Note
+    this endpoint carries no list ID: verifying the item belongs to an
+    accessible list before calling this is the caller's responsibility (a
+    security requirement, since the server cannot enforce it).
+
+    Args:
+        item_id: The item's metaId (must have ``task/`` prefix).
+        to_all: Whether every family member is meant. When ``True``,
+            ``assignee_account_ids`` must still list every member.
+        assignee_account_ids: FamilyWall account IDs to send, in order. Never
+            empty, even for ``to_all=True``.
+
+    Returns:
+        The partial taskupdate2 form fields: ``partnerScope``, ``taskId``,
+        ``toAll`` and ``assignee.N`` for each ID, in that order.
+
+    Raises:
+        MalformedPayloadError: If ``item_id`` has the wrong prefix.
+        ValueError: If ``assignee_account_ids`` is empty.
+    """
+    _validate_prefix(item_id, "task/")
+    if not assignee_account_ids:
+        raise ValueError("assignee_account_ids must not be empty")
+
+    fields: dict[str, str] = {
+        "partnerScope": "Family",
+        "taskId": item_id,
+        "toAll": "true" if to_all else "false",
+    }
+    for index, account_id in enumerate(assignee_account_ids):
+        fields[f"assignee.{index}"] = account_id
+    return fields
 
 
 def build_mark_item_fields(item_id: str, completed: bool) -> dict[str, str]:

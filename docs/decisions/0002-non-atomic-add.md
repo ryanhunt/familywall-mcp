@@ -2,6 +2,12 @@
 
 Date: 2026-09-14. Status: accepted.
 
+**Superseded by [ADR 0003](0003-single-call-add.md).** `taskcreate2` takes a
+`taskListId` directly, so `add_list_item` no longer sends `taskcreate` then
+`taskmove`, and the create-then-move partial-failure state this ADR was
+written to handle no longer exists. Read on for the historical reasoning
+(still relevant to why no compensating delete or retry was ever added).
+
 ## Context
 
 `taskcreate` has no list parameter. Placing an item in a chosen list requires
