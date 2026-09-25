@@ -1,6 +1,7 @@
 # FamilyWall calendar contract
 
-Status: **live-verified for reads**. Produced by P0 task 00B on 2026-09-13 from
+Status: **live-verified for reads, and for creating one timed, non-recurring,
+single-attendee event** (2026-09-25; see [Mutations](#mutations)). Produced by P0 task 00B on 2026-09-13 from
 `familywall-api@c85bb152115d3c41ab90322ef9dce732122ff4c0`, then settled by the
 02P read-only live probe on 2026-09-13 against a real family calendar
 (47 events in a one-month window, 1115 in a three-year window).
@@ -212,17 +213,60 @@ recurrence vocabulary they recorded (`recurrency`, `recurrencyInterval`,
 `byDay`, `byMonthDay`, `recurrencyEndDate`) is still accurate and still belongs
 to P8; the live `rrule` field is the read-path equivalent.
 
-## Mutations — excluded from v1
+## Mutations
 
-| Endpoint | Fields | Why excluded |
+### `evtcreate` — live-verified 2026-09-25, narrow scope
+
+Implemented by `create_calendar_event` for one timed, non-recurring event whose
+only attendee is the authenticated member. A controlled live check on
+2026-09-25 created one disposable event through the real tool, confirmed it by
+readback, and deleted it by exact ID.
+
+| Field | Value sent | Evidence |
 | --- | --- | --- |
-| `evtcreate` | `text`, `startDate`, `endDate`, `color`, `where`, `description`, `picture=$empty`, `timeZone=Europe/London`, `isToAll=false`, `private=`, `recurrencyInterval=1`, `recurrency=NONE`, `byDay=`, `byMonthDay=`, `recurrencyEndDate=$empty`, `reminderList=$empty` | `source-only`, no test. The hard-coded `Europe/London` timezone would create every event in the wrong zone for an Australian household |
-| `evtupdate` | as create, plus `metaId` | `source-only`; unsafe without occurrence-vs-series semantics |
-| `evtdelete` | `option=All`, `eventId.0` | `source-only`. `option=All` plausibly deletes an entire series. Deleting a whole recurring series when the user asked to cancel one soccer practice is unacceptable |
+| `partnerScope` | `Family` | live-verified |
+| `text` | title | live-verified |
+| `startDate` / `endDate` | local wall-clock time with the event zone's own offset, e.g. `2026-09-30T10:00:00+10:00` | live-verified |
+| `timeZone` | the event's IANA zone (the member's discovered zone by default) | live-verified; **never** the reference client's `Europe/London` |
+| `where`, `description` | caller value or empty string | live-verified (empty) |
+| `isToAll` | `false` | live-verified |
+| `attendee.0.accountId` | the authenticated member's account ID from discovery | live-verified (browser probe 2026-09-16, tool 2026-09-25) |
+| `picture`, `recurrencyEndDate`, `reminderList` | `$empty` | accepted |
+| `private`, `byDay`, `byMonthDay` | empty string | accepted |
+| `recurrency` / `recurrencyInterval` | `NONE` / `1` | accepted |
+| `color` | **omitted** | accepted; the created event carries no `color` key |
 
-Calendar writes belong to P8 and only after recurrence semantics are proven.
-`$empty` appears to be a sentinel for an omitted value; its meaning is
-`source-only`.
+Observed:
+
+- The event was stored at exactly the requested instant
+  (`10:00+10:00` → `startDate 2026-09-30T00:00:00.000Z`), with `timeZone`
+  echoed. The check does not tell whether the server honours the offset or reads
+  the wall clock in `timeZone`; the encoding is chosen so both give the same
+  instant, and the readback comparison would report any shift as `mismatched`.
+- The response `a00.r.r` is the full event object, with
+  `eventId == metaId == eventMasterId`, `calendarId == calendar/{family_id}`,
+  one `attendeeIds` entry, an empty `attendees`, `toAll:"false"`,
+  `editable:"true"` and `recurrency:"NONE"`.
+- `evtlistinterval` returned the same ID with identical fields, so the tool's
+  outcome was `confirmed`.
+
+Still `pending-live`: all-members (`isToAll=true`) and multiple-attendee
+encodings, all-day creation (no `allDay` field is known for writes), and a
+daylight-saving-period event (the same code path, but only a `+10:00` instant
+was observed).
+
+### `evtdelete` — live-verified for one non-recurring event, not exposed
+
+`partnerScope=Family`, `option=All`, `eventId.0=<eventId>` returned `"true"` and
+the event was absent on readback (2026-09-25, cleanup of the live check only).
+No tool exposes it. On a recurring occurrence `option=All` remains unobserved
+and plausibly deletes the whole series.
+
+### `evtupdate` — excluded
+
+Fields as create, plus `metaId`. `source-only`, and unsafe without
+occurrence-versus-series semantics. `$empty` appears to be a sentinel for an
+omitted value; its exact meaning is `source-only`.
 
 ## Test cases the port must satisfy
 
@@ -263,5 +307,6 @@ Still `pending-live`:
    preserved, so this is a presentation question, not a correctness one.
 3. **Whether a silent result cap exists** above 1115 events. The port bounds its
    own window regardless.
-4. **Every write path.** No calendar mutation has been observed live and none is
-   in v1.
+4. **Write paths beyond one timed, single-attendee create** — all-members and
+   multiple attendees, all-day create, `evtupdate`, and `evtdelete` on a
+   recurring occurrence.

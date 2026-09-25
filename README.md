@@ -20,7 +20,7 @@ HTTPS — see [Known limitations](#known-limitations) and
 
 ## What it does
 
-Six MCP tools are exposed today:
+Seven MCP tools are exposed today:
 
 | Tool | Type | Description |
 | --- | --- | --- |
@@ -30,17 +30,25 @@ Six MCP tools are exposed today:
 | `get_week_overview` | read | A timezone-aware week of calendar events (Monday- or Sunday-start), with recurrence already expanded |
 | `add_list_item` | write | Add an item to a list, with an idempotency key so retries don't create duplicates |
 | `set_list_item_checked` | write | Mark a list item checked or unchecked (explicit target state, not a toggle) |
+| `create_calendar_event` | write | Add a timed, one-off event to the family calendar, assigned to you, and confirm it by reading it back |
 
 A few things worth knowing about how these behave:
 
-- **Writes are off by default.** `add_list_item` and `set_list_item_checked`
-  stay listed but refuse before making any upstream request until
-  `FAMILYWALL_ENABLE_WRITES=true` is set deliberately.
+- **Writes are off by default.** `add_list_item`, `set_list_item_checked` and
+  `create_calendar_event` stay listed but refuse before making any upstream
+  request until `FAMILYWALL_ENABLE_WRITES=true` is set deliberately.
 - **Mutations are idempotent.** Every write takes (or generates) an
   `idempotency_key`; a durable SQLite receipt records the outcome so a retried
   call returns the original result instead of creating a duplicate.
 - **`get_week_overview` covers calendar events only** — not meals, budgets or
   undated tasks.
+- **`create_calendar_event` is deliberately narrow.** It creates one timed,
+  non-recurring event assigned to the signed-in member. Times are local to your
+  FamilyWall timezone unless you pass another `timezone` or an explicit offset;
+  a local time skipped or repeated by a daylight-saving change is refused. All-day
+  and recurring events, other attendees, and editing or deleting events are not
+  supported yet. The outcome is `confirmed` only when a readback matches the
+  request exactly; `mismatched` means the event exists but differs.
 - There is no delete or move tool yet, and item `quantity` cannot be read back
   (FamilyWall's API doesn't return it).
 

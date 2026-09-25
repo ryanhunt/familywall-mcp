@@ -6,19 +6,55 @@ conversion, deduplication, and event assignment to days.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping
-from datetime import date, datetime, timedelta
-from typing import Literal, Protocol
+from datetime import UTC, date, datetime, timedelta
+from enum import StrEnum
+from typing import TYPE_CHECKING, Literal, Protocol
+from zoneinfo import ZoneInfo, available_timezones
 
+from pydantic import Field, ValidationError, model_validator
+
+from familywall_mcp.errors import (
+    AuthenticationError,
+    ErrorInfo,
+    FamilyWallError,
+    InvalidEnvelopeError,
+    MalformedPayloadError,
+    RateLimitedError,
+    TransportError,
+    UpstreamRejectedError,
+)
 from familywall_mcp.familywall.calendar import (
     AllDaySpan,
     CalendarEvent,
     TimedSpan,
+    build_create_event_fields,
     build_interval_fields,
+    parse_created_event_id,
     parse_events,
 )
-from familywall_mcp.models import DomainModel
+from familywall_mcp.models import DomainModel, FamilyContext, OperationReceipt, Principal
 from familywall_mcp.services.ranges import resolve_days, resolve_week
+
+if TYPE_CHECKING:
+    from familywall_mcp.interfaces import ReceiptRepository
+
+MAX_EVENT_DURATION = timedelta(days=14)
+"""Longest timed event accepted; it also bounds the readback window."""
+
+READBACK_MARGIN = timedelta(days=1)
+"""Readback window padding, wide enough to find an event shifted by a zone error."""
+
+RECEIPT_TTL = timedelta(hours=24)
+
+_INDETERMINATE_ERRORS = (
+    TransportError,
+    RateLimitedError,
+    InvalidEnvelopeError,
+    MalformedPayloadError,
+)
 
 
 class CalendarTransport(Protocol):
@@ -73,6 +109,49 @@ class WeekOverview(DomainModel):
 
     notes: tuple[str, ...]
     """Human-readable caveats, e.g. 'skipped 3 malformed events'."""
+
+
+class EventWriteOutcome(StrEnum):
+    """Four-state outcome of a calendar mutation."""
+
+    CONFIRMED = "confirmed"  # a readback shows the event exactly as requested
+    MISMATCHED = "mismatched"  # created, but the readback differs from the request
+    ACKNOWLEDGED = "acknowledged"  # upstream accepted it; no readback confirmed it
+    UNKNOWN = "unknown"  # lost, timed out, unparseable, or not known to have been sent
+
+
+class NewTimedEvent(DomainModel):
+    """A validated request for one timed, non-recurring event."""
+
+    title: str = Field(min_length=1, max_length=200)
+    start: datetime
+    end: datetime
+    timezone: str
+    location: str | None = Field(default=None, max_length=500)
+    description: str | None = Field(default=None, max_length=4000)
+
+    @model_validator(mode="after")
+    def validate_event(self) -> NewTimedEvent:
+        if self.timezone not in available_timezones():
+            raise ValueError(f"unknown timezone: {self.timezone}")
+        if self.start.tzinfo is None or self.end.tzinfo is None:
+            raise ValueError("start and end must be timezone-aware")
+        if self.end <= self.start:
+            raise ValueError("end must be after start")
+        if self.end - self.start > MAX_EVENT_DURATION:
+            raise ValueError(f"events longer than {MAX_EVENT_DURATION.days} days are not supported")
+        return self
+
+
+class CreateEventResult(DomainModel):
+    """Result of creating a calendar event."""
+
+    outcome: EventWriteOutcome
+    event_id: str | None = None  # populated whenever the create response named the event
+    # Populated if and only if outcome is mismatched:
+    mismatched_fields: tuple[str, ...] = ()
+    actual_start: str | None = None  # local ISO datetime, or a date for an all-day event
+    actual_end: str | None = None
 
 
 class CalendarService:
@@ -200,6 +279,207 @@ class CalendarService:
             complete=complete,
             notes=tuple(notes),
         )
+
+    async def create_event(
+        self,
+        principal: Principal,
+        request: NewTimedEvent,
+        operation_id: str,
+        receipt_repository: ReceiptRepository,
+        family_context: FamilyContext,
+    ) -> CreateEventResult:
+        """Create one timed, non-recurring event, assigned to the authenticated member.
+
+        The single-attendee encoding is the only one observed live, so the event
+        is always assigned to ``family_context.account_id``; no caller-supplied
+        account ID ever reaches the wire.
+
+        evtcreate is sent at most once and never retried. The outcome is confirmed
+        only when a readback finds the created event ID with exactly the requested
+        title, instants, zone, location and description in the family calendar.
+
+        Receipts reuse the list-shaped ``OperationReceipt``; ``list_id`` holds the
+        family calendar ID, and the payload hash is tagged with the endpoint so a
+        key reused across tools conflicts rather than replays.
+
+        Args:
+            principal: The authenticated subject.
+            request: The validated event.
+            operation_id: Operation ID supplied by the caller; must not be empty.
+            receipt_repository: Repository for receipt tracking and idempotency.
+            family_context: The verified family context of ``principal``.
+
+        Returns:
+            CreateEventResult with the outcome.
+
+        Raises:
+            ValueError: If operation_id is empty.
+            FamilyWallError: If operation_id was used for a different request.
+            UpstreamRejectedError: If FamilyWall refused the create.
+            AuthenticationError: If the session was not accepted for the create.
+        """
+        if not operation_id or not operation_id.strip():
+            raise ValueError("operation_id must not be empty")
+
+        tz = ZoneInfo(request.timezone)
+        start = request.start.astimezone(tz)
+        end = request.end.astimezone(tz)
+        fields = build_create_event_fields(
+            title=request.title,
+            start=start,
+            end=end,
+            timezone=request.timezone,
+            attendee_account_id=family_context.account_id,
+            location=request.location,
+            description=request.description,
+        )
+        payload_hash = _hash_payload("evtcreate", family_context.calendar_id, fields)
+
+        existing = await receipt_repository.get(principal, operation_id)
+        if existing is not None:
+            return _replay_create(existing, payload_hash)
+
+        async def record(
+            status: Literal["pending", "succeeded", "unknown"],
+            result: CreateEventResult | None = None,
+        ) -> None:
+            await receipt_repository.put(
+                OperationReceipt(
+                    subject=principal.subject,
+                    family_id=family_context.family_id,
+                    list_id=family_context.calendar_id,
+                    operation_id=operation_id,
+                    payload_hash=payload_hash,
+                    status=status,
+                    upstream_id=result.model_dump_json() if result else None,
+                    expires_at=datetime.now(UTC) + RECEIPT_TTL,
+                )
+            )
+
+        await record("pending")
+
+        try:
+            response = await self.transport.call("evtcreate", fields)
+        except (UpstreamRejectedError, AuthenticationError):
+            # A definite refusal: nothing was created. A replay of this key still
+            # reports unknown rather than resending.
+            await record("unknown")
+            raise
+        except _INDETERMINATE_ERRORS:
+            await record("unknown")
+            return CreateEventResult(outcome=EventWriteOutcome.UNKNOWN)
+
+        event_id = parse_created_event_id(response)
+        acknowledged = CreateEventResult(outcome=EventWriteOutcome.ACKNOWLEDGED, event_id=event_id)
+        # Record the acknowledgement before the readback, so a crash replays as
+        # acknowledged rather than unknown.
+        await record("succeeded", acknowledged)
+        if event_id is None:
+            return acknowledged
+
+        result = await self._confirm_created(event_id, request, start, end, family_context)
+        await record("succeeded", result)
+        return result
+
+    async def _confirm_created(
+        self,
+        event_id: str,
+        request: NewTimedEvent,
+        start: datetime,
+        end: datetime,
+        family_context: FamilyContext,
+    ) -> CreateEventResult:
+        """Read the created event back and compare it with the request."""
+        fields = build_interval_fields(
+            family_context.calendar_id, start - READBACK_MARGIN, end + READBACK_MARGIN
+        )
+        try:
+            payload = await self.transport.call("evtlistinterval", fields)
+            parsed = parse_events(payload)
+        except (*_INDETERMINATE_ERRORS, UpstreamRejectedError, AuthenticationError):
+            return CreateEventResult(outcome=EventWriteOutcome.ACKNOWLEDGED, event_id=event_id)
+
+        found = next((e for e in parsed.events if e.occurrence_id == event_id), None)
+        if found is None:
+            return CreateEventResult(outcome=EventWriteOutcome.ACKNOWLEDGED, event_id=event_id)
+
+        mismatched = _readback_mismatches(found, request, start, end, family_context.calendar_id)
+        if not mismatched:
+            return CreateEventResult(outcome=EventWriteOutcome.CONFIRMED, event_id=event_id)
+
+        tz = start.tzinfo
+        if isinstance(found.span, TimedSpan):
+            actual_start = found.span.start.astimezone(tz).isoformat()
+            actual_end = found.span.end.astimezone(tz).isoformat()
+        else:
+            actual_start = found.span.start_date.isoformat()
+            actual_end = found.span.end_date.isoformat()
+        return CreateEventResult(
+            outcome=EventWriteOutcome.MISMATCHED,
+            event_id=event_id,
+            mismatched_fields=mismatched,
+            actual_start=actual_start,
+            actual_end=actual_end,
+        )
+
+
+def _hash_payload(endpoint: str, calendar_id: str, fields: Mapping[str, str]) -> str:
+    """Hash a write's full intent for operation-ID conflict detection."""
+    canonical = json.dumps(
+        {"endpoint": endpoint, "calendar_id": calendar_id, "fields": dict(fields)},
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _replay_create(existing: OperationReceipt, payload_hash: str) -> CreateEventResult:
+    """Resolve a repeated operation ID from its stored receipt, with no upstream call."""
+    if existing.payload_hash != payload_hash:
+        raise FamilyWallError(
+            ErrorInfo(
+                code="operation_id_conflict",
+                message="An operation with this ID already exists with different content.",
+                recovery="Use a different operation ID for this request.",
+            )
+        )
+    if existing.status == "succeeded" and existing.upstream_id:
+        try:
+            return CreateEventResult.model_validate_json(existing.upstream_id)
+        except ValidationError:
+            return CreateEventResult(outcome=EventWriteOutcome.ACKNOWLEDGED)
+    # pending (a crash mid-write) and unknown both resolve to unknown.
+    return CreateEventResult(outcome=EventWriteOutcome.UNKNOWN)
+
+
+def _readback_mismatches(
+    event: CalendarEvent,
+    request: NewTimedEvent,
+    start: datetime,
+    end: datetime,
+    calendar_id: str,
+) -> tuple[str, ...]:
+    """Name every field where the read-back event differs from the request."""
+    mismatched: list[str] = []
+    if event.title != request.title:
+        mismatched.append("title")
+    if not isinstance(event.span, TimedSpan):
+        mismatched.append("all_day")
+    else:
+        if event.span.start != start:
+            mismatched.append("start")
+        if event.span.end != end:
+            mismatched.append("end")
+    if event.event_timezone != request.timezone:
+        mismatched.append("timezone")
+    if (event.location or "") != (request.location or ""):
+        mismatched.append("location")
+    if (event.description or "") != (request.description or ""):
+        mismatched.append("description")
+    if event.is_recurring or event.is_series_exception:
+        mismatched.append("recurrence")
+    if event.calendar_id != calendar_id:
+        mismatched.append("calendar")
+    return tuple(mismatched)
 
 
 def _assign_timed_event(
