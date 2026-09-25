@@ -67,7 +67,7 @@ write endpoint was called. Findings are recorded in
 | Calendar recurrence expansion | **pass** — 2026-09-13; server expands occurrences; no local expansion needed |
 | Calendar all-day encoding | **pass** — 2026-09-13; `allDay:"true"` with a UTC-stamped date that must not be timezone-converted |
 | Calendar boundary semantics | **pass** — 2026-09-13; half-open overlap, `start < to && end > from` |
-| Multi-day all-day event | **pending** — needs a deliberately created test event |
+| Multi-day all-day event | **pass** — 2026-09-25; `<first>T00:00:00.000Z` to `<last>T23:59:59.000Z` with `allDay:"true"` |
 | Multi-family account discovery | **pending** — the probe account has one family |
 | `taskcreate` response shape | **pass** — 2026-09-14; returns full task object with `taskListId` showing actual destination |
 | `taskcreate` ignores list identifier | **pass** — 2026-09-14; confirmed, item lands in default list only |
@@ -79,7 +79,17 @@ write endpoint was called. Findings are recorded in
 | `taskdelete` endpoint exists and works | **pass** — 2026-09-14; deletes items immediately; 14 items tested across two runs |
 | `evtcreate`, one timed single-attendee event | **pass** — 2026-09-25; offset-form local times plus the event's `timeZone` stored the exact requested instant; `color` omitted is accepted; response is the full event object |
 | `create_calendar_event` readback confirmation | **pass** — 2026-09-25; `evtlistinterval` returned the created ID with identical title, instants, zone and calendar, so the outcome was `confirmed` |
-| `evtdelete` of one non-recurring event | **pass** — 2026-09-25; returned `"true"`, event absent on readback (live-check cleanup only; no tool) |
-| `evtcreate` all-members / multiple attendees / all-day | **pending** — only the single-attendee timed form is verified |
+| `evtdelete` of non-recurring events | **pass** — 2026-09-25; `eventId` (web app) and `eventId.0` both accepted, `"true"`, absent on readback; no tool |
+| `evtcreate` for everyone | **pass** — 2026-09-25; `isToAll=true` plus `attendee.N.accountId` for every member; reads back `toAll:"true"`, `attendeeIds: []` |
+| `evtcreate` for two named members | **pass** — 2026-09-25; `isToAll=false`, `attendee.0/1.accountId`; reads back those two IDs in order |
+| `evtcreate` all-day | **pass** — 2026-09-25; `allDay=true`, date-carrier instants, no `timeZone` field |
+| `evtupdate` attendee-only | **pass** — 2026-09-25; patch semantics: other fields unchanged, attendee set replaced by exactly the entries sent |
+| `create_calendar_event` daylight-saving instant | **pass** — 2026-09-25; `+11:00` stored correctly, `confirmed` |
+| `evtupdate` keeps an unsent non-empty `where`/`description`; all-day update | **pending** |
+| Task assignment: named and everyone (`taskupdate2`) | **pass** — 2026-09-25; `toAll` plus `assignee.N`; everyone reads back as every member |
+| `taskupdate2` partial update | **pass** — 2026-09-25; patch semantics: only the assignment changed; `description`, `dueDate` and reminder kept |
+| `taskmove` keeps assignment | **pass** — 2026-09-25; assignment, description, due date and reminder kept |
+| `taskcreate2` into a chosen list with an assignee | **pass** — 2026-09-25; single call, lands in the requested non-default list |
+| `taskcreate` default assignment | **pass** — 2026-09-25; `a00text` alone assigns every member (`toAll:"true"`) |
 | `taskmark` response shape | **pending** — 2026-09-14; effect verified by readback, response shape still unobserved |
 | Known test week matches the FamilyWall UI | **pending** — P4 |

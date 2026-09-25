@@ -9,7 +9,7 @@ gate, file boundary, acceptance criteria and who should implement it under the
 
 | Brief step | State | Where |
 | --- | --- | --- |
-| 1. Wire contracts | **Partly done.** Calendar create with one attendee (`isToAll=false`, `attendee.0.accountId`) is live-verified, and so is `evtdelete` of a non-recurring event. Nothing about list `assignee`, `evtupdate`, all-members or multiple attendees has been observed | [calendar contract](../contracts/calendar.md#mutations) |
+| 1. Wire contracts | **Done** — probe A1 (calendar) and probe A2 (lists), both 2026-09-25 | [calendar](../contracts/calendar.md#mutations), [lists](../contracts/familywall.md#probe-a2--list-assignment-and-the-2-endpoints-2026-09-25) |
 | 2. Member resolver | Not started | — |
 | 3. Read models | Not started. Live reads already show `attendeeIds`, `attendees`, `toAll` and `editable` on events, and `assignee`, `assigneeIds` and `toAll` on tasks | contracts |
 | 4. List assignment | Not started | — |
@@ -41,18 +41,27 @@ gate, file boundary, acceptance criteria and who should implement it under the
    ready, and they sign in to the FamilyWall web app in the in-app browser.
    Agents never type the password. Both probes write only disposable events and
    tasks, and delete them by exact ID afterwards.
+4. **Reminders match the web app.** Timed events created by the tool get the web
+   app's default reminder (`SNOOZE`, `MINUTE`, `30`: 30 minutes before) instead of
+   none. The readback confirmation checks the reminder too. If all-day creation
+   is added later, it uses the web's all-day default (`reminderValue=0`, shown as
+   9:00 am on the day).
+5. **`add_list_item` switches to a single `taskcreate2`.** Slice F replaces
+   create-then-move with one `taskcreate2` carrying the target list and the
+   assignment (probe A2). The `misfiled` outcome goes away, and a new ADR
+   supersedes ADR 0002.
 
 ## Slice order
 
 | Slice | Delivers | Needs | Can start |
 | --- | --- | --- | --- |
-| A1 | Calendar attendee and `evtupdate` evidence | an owner sign-in | when the owner is available |
-| A2 | List `assignee` and `taskupdate` evidence | an owner sign-in | when the owner is available |
+| A1 | Calendar attendee and `evtupdate` evidence | an owner sign-in | **done 2026-09-25** |
+| A2 | List assignment and update evidence | an owner sign-in | **done 2026-09-25** |
 | B | Member resolver, `list_family_members`, assignment read models | — | now (offline) |
 | D | Generalized receipts and migration | — | now (offline) |
 | C | Attendees on `create_calendar_event`, default everyone | A1, B | after A1 and B |
 | E | `set_calendar_event_attendees` | A1, B, D | after those |
-| F | List assignment | A2, B (D if `taskupdate` is used) | after those |
+| F | List assignment, single-call `taskcreate2` add, `set_list_item_assignees` | A2, B, D | after those |
 | G | Live acceptance and docs | each slice | per slice |
 
 Each slice is one PR. B and D can run in parallel with the probes.
@@ -62,6 +71,26 @@ Each slice is one PR. B and D can run in parallel with the probes.
 ## Slice A1 — Calendar attendee and update probe
 
 **Implementer:** lead only. Live, run when the owner signs in (decision 3).
+
+**Status: done 2026-09-25.** All five questions below were answered, and every
+disposable event was deleted. What it changes for later slices:
+
+- **C is unblocked.** Everyone is `isToAll=true` **plus** `attendee.N.accountId`
+  for every discovered member (what the web app sends). It reads back as
+  `toAll:"true"` with an empty `attendeeIds`, so C confirms everyone by `toAll`,
+  and named members by `attendeeIds`.
+- **E gets simpler.** `evtupdate` patches. E sends only `partnerScope`,
+  `option=All`, `calendarId`, `metaId`, `isToAll` and the attendee entries; it
+  does not rebuild other fields. The readback still compares every
+  non-attendee field, which also covers the one unobserved case (a non-empty
+  `where`/`description`). All-day events stay refused until an all-day update is
+  observed.
+- **Reminders differ.** The web app adds a 30-minute reminder by default
+  (all-day: 9:00 am on the day). `create_calendar_event` sends none. Decision 4
+  settles it: match the web app, in slice C.
+- **All-day creation is now known** (`allDay=true`, date-carrier instants, no
+  `timeZone`). It is outside brief 09, but could be a small follow-up tool
+  change.
 
 **Objective:** record the exact wire encodings that C and E will send, before
 any code depends on them.
@@ -99,6 +128,24 @@ verified. Recurring events are never created.
 ## Slice A2 — List assignment probe
 
 **Implementer:** lead only. Live and opt-in.
+
+**Status: done 2026-09-25, with a go for `set_list_item_assignees`.** The web app
+uses `taskcreate2`/`taskupdate2`, not the endpoints below, and the answers
+favour F:
+
+- **`taskupdate2` patches.** An update carrying only the ID and assignment kept
+  the text, description, due date, reminder and list. The due-date risk does
+  not occur.
+- **`taskmove` keeps the assignment.**
+- **`taskcreate2` takes a `taskListId` and an assignment**, and created an item
+  directly in a non-default list with that assignee, in one call. F can replace
+  create-then-move with a single create. That removes the `misfiled` outcome,
+  and supersedes ADR 0002 (a new ADR in slice F).
+- **Everyone** is `toAll=true` plus `assignee.N` for every member (what the web
+  app sends). It reads back as `toAll:"true"` with every member listed, so
+  compare as a set.
+- **Today's `add_list_item` already assigns everyone.** `taskcreate` with only
+  `a00text` gives `toAll:"true"` and every member, which matches decision 1.
 
 Same method, for `taskcreate` and `taskupdate`:
 
@@ -185,6 +232,8 @@ Files: `familywall/calendar.py` (builder), `services/calendar.py`,
   behaviour carries over unchanged.
 - The response's `assigned_to` becomes a list of display names, and it gains
   `assigned_to_everyone: bool`.
+- Replace `reminderList=$empty` with the web default reminder fields
+  (decision 4), and add the reminder to the readback comparison.
 
 **Acceptance:**
 - [ ] Full-form tests for self, two named members and everyone. Display names
@@ -260,19 +309,21 @@ Files: `familywall/calendar.py` (update builder), `services/calendar.py`,
 
 ## Slice F — List assignment
 
-**Implementer:** cheap agent after A2 and B. Lead reviews.
+**Implementer:** cheap agent after A2 and B. Lead reviews, including the new
+ADR.
 
 Files: `familywall/lists.py`, `services/lists.py`, `tools/registry.py`, tests.
 
 - `add_list_item` gains `assigned_to` (blank means everyone).
-  - If A2 shows `taskmove` keeps the assignment, send `assignee` on
-    `taskcreate`.
-  - Otherwise assign after the move, and report a failed assignment as its own
-    outcome (e.g. `unassigned`) rather than folding it into `misfiled`.
-  - `confirmed` needs the right list *and* the right assignment.
-- `set_list_item_assignees` is built **only on an A2 go**. It verifies list
-  membership first (as `set_list_item_checked` does), preserves every field
-  `taskupdate` requires, writes once and reads back.
+  - Switch to a single `taskcreate2` with the target `taskListId`, `toAll` and
+    `assignee.N` (A2). Drop the move step, and with it the `misfiled` outcome.
+    Record the change in an ADR superseding ADR 0002.
+  - `confirmed` needs the right list *and* the right assignment, compared as a
+    set.
+- `set_list_item_assignees` (A2 go): verify list membership first (as
+  `set_list_item_checked` does), then send one partial `taskupdate2` with
+  `taskId`, `toAll` and `assignee.N`. Read back, and require the other fields
+  to be unchanged.
 
 **Acceptance:**
 - [ ] The resolved assignment is part of the payload hash, and the existing

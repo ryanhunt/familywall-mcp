@@ -126,6 +126,21 @@ outcome `confirmed`, stored at exactly the requested instant in
 (`"true"`, absent on readback). Details are in the
 [calendar contract](contracts/calendar.md#mutations).
 
+### Probe A1, 2026-09-25 — calendar attendees and updates
+
+With the owner signed in to the web app, its own `evtcreate`, `evtupdate` and
+`evtdelete` forms were captured (masked), and a partial `evtupdate` and a
+daylight-saving create were scripted. Five disposable events were created and
+all were deleted. Findings are in the
+[calendar contract](contracts/calendar.md#probe-a1--the-web-apps-own-forms-2026-09-25).
+
+### Probe A2, 2026-09-25 — list assignment
+
+The web app's own `taskcreate2`/`taskupdate2` forms were captured (masked), and
+partial-update, move and single-call-create checks were scripted. Four
+disposable items were created and all were deleted. Findings are in the
+[FamilyWall contract](contracts/familywall.md#probe-a2--list-assignment-and-the-2-endpoints-2026-09-25).
+
 ## Still `pending-live`
 
 Recorded so they are not quietly dropped:
@@ -134,9 +149,8 @@ Recorded so they are not quietly dropped:
   check and uncheck both took effect, confirmed by readback, with an explicit
   `false` honoured), but its returned payload was never inspected. Low value to
   close: the service re-reads the list to confirm state either way.
-- Multi-day all-day encoding — needs a deliberately created test event.
-- Calendar create beyond one timed, single-attendee event: all-members and
-  multiple attendees, all-day create, and a daylight-saving-period instant.
+- Calendar writes: whether `evtupdate` keeps a non-empty `where`/`description`
+  it was not sent, `evtupdate` on an all-day event, and anything recurring.
 - Multi-family discovery shape — the probe account has one family, so the
   single-family refusal must fail closed on anything unexpected.
 
