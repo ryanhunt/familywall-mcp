@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import uuid
 from datetime import date
 from typing import Literal
@@ -16,15 +17,16 @@ from familywall_mcp.familywall.calendar import CalendarEvent
 from familywall_mcp.familywall.discovery import DiscoveredFamily
 from familywall_mcp.familywall.lists import ListItem
 from familywall_mcp.interfaces import ReceiptRepository
-from familywall_mcp.models import DomainModel
+from familywall_mcp.models import DomainModel, Principal
 from familywall_mcp.services.calendar import CalendarService, NewTimedEvent
 from familywall_mcp.services.lists import ListService
 from familywall_mcp.services.members import (
     MemberSelectionError,
+    ResolvedAssignment,
     describe_assignment,
     resolve_members,
 )
-from familywall_mcp.services.principal_context import ContextResolver
+from familywall_mcp.services.principal_context import ContextResolver, PrincipalContext
 from familywall_mcp.services.ranges import resolve_event_time
 from familywall_mcp.services.session import SessionPool
 from familywall_mcp.services.transport import read_transport, write_transport
@@ -139,6 +141,19 @@ class CreateCalendarEventResponse(DomainModel):
     mismatched_fields: tuple[str, ...] = ()
     actual_start: str | None = None  # what the readback shows
     actual_end: str | None = None
+
+
+class SetCalendarEventAttendeesResponse(DomainModel):
+    """Response from set_calendar_event_attendees."""
+
+    family_name: str
+    outcome: str
+    event_id: str
+    assigned_to: tuple[str, ...]
+    """Display names only, never account IDs; every member's name for everyone."""
+    assigned_to_everyone: bool
+    # Populated if and only if outcome is mismatched:
+    mismatched_fields: tuple[str, ...] = ()
 
 
 class ErrorResponse(DomainModel):
@@ -256,6 +271,25 @@ class ToolRegistry:
             ),
             annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
         )(self._create_calendar_event)
+
+        server.tool(
+            name="set_calendar_event_attendees",
+            description=(
+                "Change only who an existing, ordinary, one-off, timed family-calendar "
+                "event is assigned to; nothing else about the event changes. event_id is "
+                "the occurrence_id from get_week_overview, and date is that event's local "
+                "date (YYYY-MM-DD) in your FamilyWall timezone. assigned_to takes member "
+                "names exactly as list_family_members shows them; omit it, or pass an "
+                "empty list, to assign everyone. An unknown name triggers one refresh of "
+                "the cached family list before failing. All-day events, recurring events "
+                "and series exceptions are refused, as is any event this account cannot "
+                "edit. Outcome is confirmed only when a readback shows the new attendees "
+                "and every other field unchanged; mismatched means something else also "
+                "changed. Without idempotency_key, retries will conflict rather than "
+                "resend."
+            ),
+            annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
+        )(self._set_calendar_event_attendees)
 
     async def _get_connection_status(self) -> ConnectionStatusResponse | ErrorResponse:
         """Get the connection status and authenticated member's timezone.
@@ -591,15 +625,7 @@ class ToolRegistry:
             except ValueError as exc:
                 return _invalid_event(str(exc))
 
-            try:
-                assignment = resolve_members(assigned_to, ctx.discovered_family)
-            except MemberSelectionError as exc:
-                if exc.info.code != "unknown_member":
-                    raise
-                # The cached family list may simply be stale: refresh discovery
-                # once and try again. A second failure (of any kind) propagates.
-                principal, ctx = await self._context_resolver.refresh()
-                assignment = resolve_members(assigned_to, ctx.discovered_family)
+            principal, ctx, assignment = await self._resolve_assignment(principal, ctx, assigned_to)
 
             transport = write_transport(self._session_pool, principal)
             service = CalendarService(transport)
@@ -635,6 +661,127 @@ class ToolRegistry:
                 error_message=exc.info.message,
                 error_recovery=exc.info.recovery,
             )
+
+    async def _set_calendar_event_attendees(
+        self,
+        event_id: str,
+        date: str,
+        assigned_to: list[str] | None = None,
+        idempotency_key: str | None = None,
+    ) -> SetCalendarEventAttendeesResponse | ErrorResponse:
+        """Change only who an existing, safe-to-update event is assigned to.
+
+        If writes are disabled, returns an error response with zero upstream calls.
+        An unparseable ``date`` is rejected before any call.
+
+        Args:
+            event_id: The occurrence_id, e.g. from get_week_overview.
+            date: The event's local date (``YYYY-MM-DD``) in the authenticated
+                member's FamilyWall timezone.
+            assigned_to: Member names to assign, exactly as list_family_members shows
+                them. ``None`` or ``[]`` means everyone. Resolved the same
+                refresh-once-on-unknown-name way, and at the same point (before any
+                lookup, receipt or write), as ``create_calendar_event``'s
+                ``assigned_to``.
+            idempotency_key: Optional operation ID for idempotency; generates UUID if
+                not provided.
+
+        Returns:
+            SetCalendarEventAttendeesResponse on success, or ErrorResponse on failure
+            (including ``event_not_found`` if no event with ``event_id`` exists on
+            that local day, and ``unsupported_event`` if the event is not an
+            ordinary, one-off, timed, editable event on the family calendar).
+        """
+        # Write gate: check if writes are enabled BEFORE any upstream call
+        if not self._config.enable_writes:
+            return ErrorResponse(
+                error_code="writes_disabled",
+                error_message="Write operations are disabled.",
+                error_recovery="Set FAMILYWALL_ENABLE_WRITES=true to enable writes.",
+            )
+
+        try:
+            local_day = datetime.date.fromisoformat(date)
+        except ValueError:
+            return ErrorResponse(
+                error_code="invalid_request",
+                error_message="The date could not be parsed.",
+                error_recovery="Use an ISO local date, e.g. 2026-10-06.",
+            )
+
+        try:
+            principal, ctx = await self._context_resolver.resolve()
+            principal, ctx, assignment = await self._resolve_assignment(principal, ctx, assigned_to)
+
+            transport = write_transport(self._session_pool, principal)
+            service = CalendarService(transport)
+
+            # Generate operation ID if not provided
+            operation_id = idempotency_key or str(uuid.uuid4())
+
+            result = await service.set_event_attendees(
+                principal,
+                event_id,
+                local_day,
+                ctx.authenticated_member_timezone,
+                assignment,
+                operation_id,
+                self._receipt_repository,
+                ctx.family_context,
+            )
+
+            return SetCalendarEventAttendeesResponse(
+                family_name=ctx.discovered_family.name,
+                outcome=result.outcome.value,
+                event_id=result.event_id,
+                assigned_to=assignment.display_names,
+                assigned_to_everyone=assignment.to_all,
+                mismatched_fields=result.mismatched_fields,
+            )
+        except FamilyWallError as exc:
+            return ErrorResponse(
+                error_code=exc.info.code,
+                error_message=exc.info.message,
+                error_recovery=exc.info.recovery,
+            )
+
+    async def _resolve_assignment(
+        self,
+        principal: Principal,
+        ctx: PrincipalContext,
+        assigned_to: list[str] | None,
+    ) -> tuple[Principal, PrincipalContext, ResolvedAssignment]:
+        """Resolve ``assigned_to`` against the cached family, refreshing once.
+
+        Shared by ``create_calendar_event`` and ``set_calendar_event_attendees``;
+        callers must run this before any lookup, receipt or write. A name unknown
+        to the cached family list triggers exactly one discovery refresh (the
+        cached list may simply be stale) and a second resolution attempt; a
+        second failure of any kind propagates. An ambiguous or otherwise invalid
+        name never refreshes and makes zero upstream calls.
+
+        Args:
+            principal: The current principal, from ``context_resolver.resolve()``.
+            ctx: The current principal's context, from the same call.
+            assigned_to: Member names to resolve, or ``None``/``[]`` for everyone.
+
+        Returns:
+            The (possibly refreshed) principal, context and resolved assignment.
+
+        Raises:
+            MemberSelectionError: For an unknown name that a refresh still can't
+                find, or immediately for an ambiguous or otherwise invalid name.
+        """
+        try:
+            assignment = resolve_members(assigned_to, ctx.discovered_family)
+        except MemberSelectionError as exc:
+            if exc.info.code != "unknown_member":
+                raise
+            # The cached family list may simply be stale: refresh discovery
+            # once and try again. A second failure (of any kind) propagates.
+            principal, ctx = await self._context_resolver.refresh()
+            assignment = resolve_members(assigned_to, ctx.discovered_family)
+        return principal, ctx, assignment
 
 
 def _invalid_event(detail: str) -> ErrorResponse:

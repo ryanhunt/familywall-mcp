@@ -46,11 +46,11 @@ same policy.
    and run the project-defined checks: `uv sync --frozen --group dev`,
    `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy src`,
    `uv run pytest -m 'not live'`, `uv build`, and `scripts/check`. Live tests
-   remain opt-in. Seven of the eight MCP tools (list read/write, calendar
+   remain opt-in. Seven of the nine MCP tools (list read/write, calendar
    read, and timed calendar-event create) are implemented and live-verified
-   against a real FamilyWall account; `list_family_members` is implemented
-   and unit-tested but not yet live-verified, and the OAuth provider and
-   hosted mode are not.
+   against a real FamilyWall account; `list_family_members` and
+   `set_calendar_event_attendees` are implemented and unit-tested but not yet
+   live-verified, and the OAuth provider and hosted mode are not.
 
 ## Security and data handling
 

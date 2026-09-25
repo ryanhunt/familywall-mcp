@@ -20,7 +20,7 @@ HTTPS — see [Known limitations](#known-limitations) and
 
 ## What it does
 
-Eight MCP tools are exposed today:
+Nine MCP tools are exposed today:
 
 | Tool | Type | Description |
 | --- | --- | --- |
@@ -32,12 +32,14 @@ Eight MCP tools are exposed today:
 | `add_list_item` | write | Add an item to a list, with an idempotency key so retries don't create duplicates |
 | `set_list_item_checked` | write | Mark a list item checked or unchecked (explicit target state, not a toggle) |
 | `create_calendar_event` | write | Add a timed, one-off event to the family calendar, assigned to everyone or to named members, and confirm it by reading it back |
+| `set_calendar_event_attendees` | write | Change only who an existing, ordinary, one-off, timed family-calendar event is assigned to, and confirm nothing else about it changed |
 
 A few things worth knowing about how these behave:
 
-- **Writes are off by default.** `add_list_item`, `set_list_item_checked` and
-  `create_calendar_event` stay listed but refuse before making any upstream
-  request until `FAMILYWALL_ENABLE_WRITES=true` is set deliberately.
+- **Writes are off by default.** `add_list_item`, `set_list_item_checked`,
+  `create_calendar_event` and `set_calendar_event_attendees` stay listed but
+  refuse before making any upstream request until
+  `FAMILYWALL_ENABLE_WRITES=true` is set deliberately.
 - **Mutations are idempotent.** Every write takes (or generates) an
   `idempotency_key`; a durable SQLite receipt records the outcome so a retried
   call returns the original result instead of creating a duplicate.
@@ -52,10 +54,21 @@ A few things worth knowing about how these behave:
   FamilyWall's own default 30-minute reminder. Times are local to your
   FamilyWall timezone unless you pass another `timezone` or an explicit offset;
   a local time skipped or repeated by a daylight-saving change is refused.
-  All-day and recurring events, and editing or deleting events, are not
-  supported yet. The outcome is `confirmed` only when a readback matches the
-  request exactly (including the attendees and the reminder); `mismatched`
-  means the event exists but differs.
+  All-day and recurring events, and deleting events, are not supported yet.
+  The outcome is `confirmed` only when a readback matches the request exactly
+  (including the attendees and the reminder); `mismatched` means the event
+  exists but differs.
+- **`set_calendar_event_attendees` changes only who a timed, one-off event is
+  assigned to.** `event_id` is the `occurrence_id` `get_week_overview` returns,
+  and `date` is that event's local date in your FamilyWall timezone.
+  `assigned_to` works exactly as it does for `create_calendar_event`; an
+  unknown name triggers the same one-time discovery refresh. Before writing
+  anything, it refuses an event that is on another calendar, not editable,
+  recurring, a series exception, not an ordinary event, or all-day. It sends
+  only the attendee fields — nothing else about the event is ever rebuilt —
+  and is `confirmed` only when a readback shows the new attendees and every
+  other field (title, time, zone, location, description, recurrence, calendar,
+  reminder) unchanged; `mismatched` means something else also changed.
 - There is no delete or move tool yet, and item `quantity` cannot be read back
   (FamilyWall's API doesn't return it).
 - **Assignment is shown by name, never by account ID.** `get_week_overview` and

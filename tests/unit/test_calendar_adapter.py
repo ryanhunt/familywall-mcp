@@ -36,6 +36,7 @@ from familywall_mcp.familywall.calendar import (
     TimedSpan,
     build_create_event_fields,
     build_interval_fields,
+    build_update_attendees_fields,
     parse_created_event_id,
     parse_events,
 )
@@ -471,6 +472,69 @@ class TestBuildCreateEventFields:
                 timezone="UTC",
                 to_all=False,
                 attendee_account_ids=("acct-synthetic-1",),
+            )
+
+
+class TestBuildUpdateAttendeesFields:
+    """E1: the evtupdate attendees-only form builder."""
+
+    def test_e1_complete_form_for_everyone(self) -> None:
+        """E1: everyone sends exactly the six field kinds: partnerScope, option,
+        calendarId, metaId, isToAll=true, and every member's attendee.N.accountId,
+        in discovery order."""
+        fields = build_update_attendees_fields(
+            event_id="event/existing-1",
+            calendar_id="calendar/family-123",
+            to_all=True,
+            attendee_account_ids=("acct-synthetic-1", "acct-synthetic-2", "acct-synthetic-3"),
+        )
+
+        assert fields == {
+            "partnerScope": "Family",
+            "option": "All",
+            "calendarId": "calendar/family-123",
+            "metaId": "event/existing-1",
+            "isToAll": "true",
+            "attendee.0.accountId": "acct-synthetic-1",
+            "attendee.1.accountId": "acct-synthetic-2",
+            "attendee.2.accountId": "acct-synthetic-3",
+        }
+
+    def test_e1_complete_form_for_named_members(self) -> None:
+        """E1: named members send isToAll=false and the given IDs, in the given
+        order. Nothing else is sent; no other field is rebuilt."""
+        fields = build_update_attendees_fields(
+            event_id="event/existing-1",
+            calendar_id="calendar/family-123",
+            to_all=False,
+            attendee_account_ids=("acct-synthetic-2", "acct-synthetic-1"),
+        )
+
+        assert fields == {
+            "partnerScope": "Family",
+            "option": "All",
+            "calendarId": "calendar/family-123",
+            "metaId": "event/existing-1",
+            "isToAll": "false",
+            "attendee.0.accountId": "acct-synthetic-2",
+            "attendee.1.accountId": "acct-synthetic-1",
+        }
+
+    def test_e1_builder_rejects_empty_attendees(self) -> None:
+        """E1: an empty attendee_account_ids is rejected regardless of to_all."""
+        with pytest.raises(ValueError):
+            build_update_attendees_fields(
+                event_id="event/existing-1",
+                calendar_id="calendar/family-123",
+                to_all=False,
+                attendee_account_ids=(),
+            )
+        with pytest.raises(ValueError):
+            build_update_attendees_fields(
+                event_id="event/existing-1",
+                calendar_id="calendar/family-123",
+                to_all=True,
+                attendee_account_ids=(),
             )
 
 
