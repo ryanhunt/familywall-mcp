@@ -244,6 +244,10 @@ that domain — no manual certificate management.
 
 ### 5. Deploy
 
+If you are upgrading an existing deployment, back up the data volume
+(`familywall_data`) first: this release migrates the receipts table in place,
+and an older image cannot read the migrated database.
+
 ```bash
 docker compose -f docker-compose.prod.yml up -d --build
 ```

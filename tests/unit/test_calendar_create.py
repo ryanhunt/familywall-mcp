@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -310,13 +311,14 @@ class TestReceipts:
         assert transport.calls == []
 
     async def test_key_used_by_a_list_write_conflicts(self) -> None:
-        """A key first used for another tool never replays as a calendar create."""
+        """R12: an existing receipt with a list.* action is a conflict, zero calls."""
         receipts = InMemoryReceiptRepository()
         await receipts.put(
             OperationReceipt(
                 subject=PRINCIPAL.subject,
                 family_id=FAMILY.family_id,
-                list_id="taskList/1",
+                resource_id="taskList/1",
+                action="list.add_item",
                 operation_id="op-1",
                 payload_hash="list-hash",
                 status="succeeded",
@@ -326,9 +328,10 @@ class TestReceipts:
         )
         transport = ScriptedTransport({})
 
-        with pytest.raises(FamilyWallError):
+        with pytest.raises(FamilyWallError) as excinfo:
             await create(transport, receipts)
 
+        assert excinfo.value.info.code == "operation_id_conflict"
         assert transport.calls == []
 
     async def test_crash_mid_write_replays_as_unknown(self) -> None:
@@ -344,15 +347,50 @@ class TestReceipts:
         assert result.outcome is EventWriteOutcome.UNKNOWN
         assert transport.calls == []
 
-    async def test_refused_create_replays_as_unknown_without_resending(self) -> None:
+    @pytest.mark.parametrize("error", [UpstreamRejectedError(), SessionExpiredError()])
+    async def test_refused_create_records_rejected_and_replays_the_same_error(
+        self, error: FamilyWallError
+    ) -> None:
+        """R11: a refused create records 'rejected' with the error JSON; a replay
+        raises the same error code, with zero calls."""
         receipts = InMemoryReceiptRepository()
-        with pytest.raises(UpstreamRejectedError):
-            await create(ScriptedTransport({"evtcreate": UpstreamRejectedError()}), receipts)
+        with pytest.raises(type(error)):
+            await create(ScriptedTransport({"evtcreate": error}), receipts)
+
+        receipt = await receipts.get(PRINCIPAL, "op-1")
+        assert receipt is not None
+        assert receipt.status == "rejected"
+        stored = json.loads(receipt.upstream_id or "{}")
+        assert stored == {
+            "code": error.info.code,
+            "message": error.info.message,
+            "recovery": error.info.recovery,
+        }
+
         transport = ScriptedTransport({})
+        with pytest.raises(FamilyWallError) as excinfo:
+            await create(transport, receipts)
 
-        result = await create(transport, receipts)
+        assert excinfo.value.info.code == error.info.code
+        assert transport.calls == []
 
-        assert result.outcome is EventWriteOutcome.UNKNOWN
+    async def test_legacy_receipt_with_matching_hash_replays_stored_result(self) -> None:
+        """R13: a 'legacy' receipt with a matching hash replays its stored result."""
+        receipts = InMemoryReceiptRepository()
+        result1 = await create(created_then_read(stored_event()), receipts)
+        assert result1.outcome is EventWriteOutcome.CONFIRMED
+
+        # Simulate a database migrated from the pre-`action` schema: the stored
+        # receipt's action becomes "legacy", but its hash is untouched.
+        receipt = await receipts.get(PRINCIPAL, "op-1")
+        assert receipt is not None
+        await receipts.put(receipt.model_copy(update={"action": "legacy"}))
+
+        transport = ScriptedTransport({})
+        result2 = await create(transport, receipts)
+
+        assert result2.outcome is EventWriteOutcome.CONFIRMED
+        assert result2.event_id == result1.event_id
         assert transport.calls == []
 
     async def test_acknowledgement_is_recorded_before_readback(self) -> None:
@@ -381,7 +419,8 @@ class TestReceipts:
 
         assert receipt is not None
         assert receipt.family_id == "family-123"
-        assert receipt.list_id == "calendar/family-123"
+        assert receipt.resource_id == "calendar/family-123"
+        assert receipt.action == "calendar.create_event"
         assert receipt.status == "succeeded"
 
     async def test_receipts_are_isolated_by_subject(self) -> None:

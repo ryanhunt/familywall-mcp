@@ -26,7 +26,8 @@ class TestInMemoryReceiptRepository:
         return OperationReceipt(
             subject="user1",
             family_id="family123",
-            list_id="list456",
+            resource_id="list456",
+            action="list.add_item",
             operation_id="op001",
             payload_hash="hash123",
             status="pending",
@@ -71,7 +72,8 @@ class TestInMemoryReceiptRepository:
         updated_receipt = OperationReceipt(
             subject=receipt.subject,
             family_id=receipt.family_id,
-            list_id=receipt.list_id,
+            resource_id=receipt.resource_id,
+            action=receipt.action,
             operation_id=receipt.operation_id,
             payload_hash=receipt.payload_hash,
             status="succeeded",
@@ -92,7 +94,8 @@ class TestInMemoryReceiptRepository:
         receipt1 = OperationReceipt(
             subject="user1",
             family_id="fam1",
-            list_id="list1",
+            resource_id="list1",
+            action="list.add_item",
             operation_id="op1",
             payload_hash="hash1",
             status="pending",
@@ -102,7 +105,8 @@ class TestInMemoryReceiptRepository:
         receipt2 = OperationReceipt(
             subject="user2",
             family_id="fam2",
-            list_id="list2",
+            resource_id="list2",
+            action="list.add_item",
             operation_id="op1",
             payload_hash="hash2",
             status="pending",
@@ -118,3 +122,24 @@ class TestInMemoryReceiptRepository:
         assert retrieved2 is receipt2
         assert retrieved1.subject == "user1"
         assert retrieved2.subject == "user2"
+
+    async def test_rejected_status_round_trips(
+        self, repository: InMemoryReceiptRepository, principal: Principal
+    ) -> None:
+        """R6: a 'rejected' receipt round-trips through the in-memory store."""
+        rejected = OperationReceipt(
+            subject="user1",
+            family_id="family123",
+            resource_id="calendar/family123",
+            action="calendar.create_event",
+            operation_id="op-rejected",
+            payload_hash="hash123",
+            status="rejected",
+            upstream_id='{"code": "upstream_rejected", "message": "no", "recovery": "retry"}',
+            expires_at=datetime(2026, 12, 31, 23, 59, 59, tzinfo=UTC),
+        )
+        await repository.put(rejected)
+        retrieved = await repository.get(principal, "op-rejected")
+        assert retrieved is not None
+        assert retrieved.status == "rejected"
+        assert retrieved.upstream_id == rejected.upstream_id

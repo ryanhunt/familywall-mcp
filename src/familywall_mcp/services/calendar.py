@@ -298,9 +298,13 @@ class CalendarService:
         only when a readback finds the created event ID with exactly the requested
         title, instants, zone, location and description in the family calendar.
 
-        Receipts reuse the list-shaped ``OperationReceipt``; ``list_id`` holds the
-        family calendar ID, and the payload hash is tagged with the endpoint so a
-        key reused across tools conflicts rather than replays.
+        Receipts carry ``resource_id=family_context.calendar_id`` and
+        ``action="calendar.create_event"``; the payload hash is tagged with the
+        endpoint so a key reused across tools conflicts rather than replays. A
+        definite refusal (``UpstreamRejectedError`` or ``AuthenticationError``)
+        is recorded as ``status="rejected"`` with the error's code, message and
+        recovery so a replay raises the same error rather than reporting
+        ``unknown``.
 
         Args:
             principal: The authenticated subject.
@@ -340,18 +344,24 @@ class CalendarService:
             return _replay_create(existing, payload_hash)
 
         async def record(
-            status: Literal["pending", "succeeded", "unknown"],
+            status: Literal["pending", "succeeded", "unknown", "rejected"],
             result: CreateEventResult | None = None,
+            upstream_id: str | None = None,
         ) -> None:
             await receipt_repository.put(
                 OperationReceipt(
                     subject=principal.subject,
                     family_id=family_context.family_id,
-                    list_id=family_context.calendar_id,
+                    resource_id=family_context.calendar_id,
+                    action="calendar.create_event",
                     operation_id=operation_id,
                     payload_hash=payload_hash,
                     status=status,
-                    upstream_id=result.model_dump_json() if result else None,
+                    upstream_id=(
+                        upstream_id
+                        if upstream_id is not None
+                        else (result.model_dump_json() if result else None)
+                    ),
                     expires_at=datetime.now(UTC) + RECEIPT_TTL,
                 )
             )
@@ -360,10 +370,16 @@ class CalendarService:
 
         try:
             response = await self.transport.call("evtcreate", fields)
-        except (UpstreamRejectedError, AuthenticationError):
-            # A definite refusal: nothing was created. A replay of this key still
-            # reports unknown rather than resending.
-            await record("unknown")
+        except (UpstreamRejectedError, AuthenticationError) as exc:
+            # A definite refusal: nothing was created. Record it as rejected so a
+            # replay of this key raises the same refusal instead of resending.
+            info = exc.info
+            await record(
+                "rejected",
+                upstream_id=json.dumps(
+                    {"code": info.code, "message": info.message, "recovery": info.recovery}
+                ),
+            )
             raise
         except _INDETERMINATE_ERRORS:
             await record("unknown")
@@ -434,6 +450,16 @@ def _hash_payload(endpoint: str, calendar_id: str, fields: Mapping[str, str]) ->
 
 def _replay_create(existing: OperationReceipt, payload_hash: str) -> CreateEventResult:
     """Resolve a repeated operation ID from its stored receipt, with no upstream call."""
+    # A receipt written by a different tool (or reused across tools) never replays
+    # as this one; a migrated "legacy" receipt is accepted either way.
+    if existing.action not in ("calendar.create_event", "legacy"):
+        raise FamilyWallError(
+            ErrorInfo(
+                code="operation_id_conflict",
+                message="An operation with this ID already exists with different content.",
+                recovery="Use a different operation ID for this request.",
+            )
+        )
     if existing.payload_hash != payload_hash:
         raise FamilyWallError(
             ErrorInfo(
@@ -442,6 +468,8 @@ def _replay_create(existing: OperationReceipt, payload_hash: str) -> CreateEvent
                 recovery="Use a different operation ID for this request.",
             )
         )
+    if existing.status == "rejected":
+        raise _rebuild_rejection(existing.upstream_id)
     if existing.status == "succeeded" and existing.upstream_id:
         try:
             return CreateEventResult.model_validate_json(existing.upstream_id)
@@ -449,6 +477,23 @@ def _replay_create(existing: OperationReceipt, payload_hash: str) -> CreateEvent
             return CreateEventResult(outcome=EventWriteOutcome.ACKNOWLEDGED)
     # pending (a crash mid-write) and unknown both resolve to unknown.
     return CreateEventResult(outcome=EventWriteOutcome.UNKNOWN)
+
+
+def _rebuild_rejection(upstream_id: str | None) -> FamilyWallError:
+    """Rebuild the original refusal from its stored JSON, for a rejected replay.
+
+    Falls back to a plain ``UpstreamRejectedError`` if the JSON is missing or
+    unreadable, so a replay never raises anything but a ``FamilyWallError``.
+    """
+    if upstream_id:
+        try:
+            info = json.loads(upstream_id)
+            return FamilyWallError(
+                ErrorInfo(code=info["code"], message=info["message"], recovery=info["recovery"])
+            )
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass
+    return UpstreamRejectedError()
 
 
 def _readback_mismatches(

@@ -263,6 +263,16 @@ class ListService:
         # Check receipt repository for existing operation
         existing_receipt = await receipt_repository.get(principal, operation_id)
         if existing_receipt is not None:
+            # A receipt written by a different tool (or reused across tools) never
+            # replays as this one; a migrated "legacy" receipt is accepted either way.
+            if existing_receipt.action not in ("list.add_item", "legacy"):
+                raise FamilyWallError(
+                    ErrorInfo(
+                        code="operation_id_conflict",
+                        message="An operation with this ID already exists with different content.",
+                        recovery="Use a different operation ID for this request.",
+                    )
+                )
             # If status is pending (previous process crashed mid-write), resolve to UNKNOWN
             if existing_receipt.status == "pending":
                 return (
@@ -308,7 +318,8 @@ class ListService:
         pending_receipt = OperationReceipt(
             subject=principal.subject,
             family_id=family_id,
-            list_id=list_id,
+            resource_id=list_id,
+            action="list.add_item",
             operation_id=operation_id,
             payload_hash=payload_hash,
             status="pending",
@@ -325,7 +336,8 @@ class ListService:
             unknown_receipt = OperationReceipt(
                 subject=principal.subject,
                 family_id=family_id,
-                list_id=list_id,
+                resource_id=list_id,
+                action="list.add_item",
                 operation_id=operation_id,
                 payload_hash=payload_hash,
                 status="unknown",
@@ -343,7 +355,8 @@ class ListService:
             unknown_receipt = OperationReceipt(
                 subject=principal.subject,
                 family_id=family_id,
-                list_id=list_id,
+                resource_id=list_id,
+                action="list.add_item",
                 operation_id=operation_id,
                 payload_hash=payload_hash,
                 status="unknown",
@@ -364,7 +377,8 @@ class ListService:
             unknown_receipt = OperationReceipt(
                 subject=principal.subject,
                 family_id=family_id,
-                list_id=list_id,
+                resource_id=list_id,
+                action="list.add_item",
                 operation_id=operation_id,
                 payload_hash=payload_hash,
                 status="unknown",
@@ -388,7 +402,8 @@ class ListService:
             final_receipt = OperationReceipt(
                 subject=principal.subject,
                 family_id=family_id,
-                list_id=list_id,
+                resource_id=list_id,
+                action="list.add_item",
                 operation_id=operation_id,
                 payload_hash=payload_hash,
                 status="succeeded",
@@ -429,7 +444,8 @@ class ListService:
             misfiled_receipt = OperationReceipt(
                 subject=principal.subject,
                 family_id=family_id,
-                list_id=list_id,
+                resource_id=list_id,
+                action="list.add_item",
                 operation_id=operation_id,
                 payload_hash=payload_hash,
                 status="succeeded",
@@ -459,7 +475,8 @@ class ListService:
             misfiled_receipt = OperationReceipt(
                 subject=principal.subject,
                 family_id=family_id,
-                list_id=list_id,
+                resource_id=list_id,
+                action="list.add_item",
                 operation_id=operation_id,
                 payload_hash=payload_hash,
                 status="succeeded",
@@ -490,7 +507,8 @@ class ListService:
             final_receipt = OperationReceipt(
                 subject=principal.subject,
                 family_id=family_id,
-                list_id=list_id,
+                resource_id=list_id,
+                action="list.add_item",
                 operation_id=operation_id,
                 payload_hash=payload_hash,
                 status="succeeded",
@@ -520,7 +538,8 @@ class ListService:
         final_receipt = OperationReceipt(
             subject=principal.subject,
             family_id=family_id,
-            list_id=list_id,
+            resource_id=list_id,
+            action="list.add_item",
             operation_id=operation_id,
             payload_hash=payload_hash,
             status="succeeded",
@@ -584,6 +603,16 @@ class ListService:
         # Check receipt repository for existing operation (before any item verification)
         existing_receipt = await receipt_repository.get(principal, operation_id)
         if existing_receipt is not None:
+            # A receipt written by a different tool (or reused across tools) never
+            # replays as this one; a migrated "legacy" receipt is accepted either way.
+            if existing_receipt.action not in ("list.set_checked", "legacy"):
+                raise FamilyWallError(
+                    ErrorInfo(
+                        code="operation_id_conflict",
+                        message="An operation with this ID already exists with different content.",
+                        recovery="Use a different operation ID for this request.",
+                    )
+                )
             # If status is pending (previous process crashed mid-write), resolve to UNKNOWN
             if existing_receipt.status == "pending":
                 return SetItemCheckedResult(outcome=WriteOutcome.UNKNOWN)
@@ -630,7 +659,8 @@ class ListService:
         pending_receipt = OperationReceipt(
             subject=principal.subject,
             family_id=family_id,
-            list_id=item_list_id,
+            resource_id=item_list_id,
+            action="list.set_checked",
             operation_id=operation_id,
             payload_hash=payload_hash,
             status="pending",
@@ -650,7 +680,8 @@ class ListService:
             unknown_receipt = OperationReceipt(
                 subject=principal.subject,
                 family_id=family_id,
-                list_id=item_list_id,
+                resource_id=item_list_id,
+                action="list.set_checked",
                 operation_id=operation_id,
                 payload_hash=payload_hash,
                 status="unknown",
@@ -665,7 +696,8 @@ class ListService:
         final_receipt = OperationReceipt(
             subject=principal.subject,
             family_id=family_id,
-            list_id=item_list_id,
+            resource_id=item_list_id,
+            action="list.set_checked",
             operation_id=operation_id,
             payload_hash=payload_hash,
             status="succeeded",

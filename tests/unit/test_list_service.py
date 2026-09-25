@@ -658,7 +658,8 @@ class TestListServiceMutation:
         pending_receipt = OperationReceipt(
             subject=principal.subject,
             family_id="fam1",
-            list_id="taskList/1",
+            resource_id="taskList/1",
+            action="list.add_item",
             operation_id="crashed_op",
             payload_hash="somehash",
             status="pending",
@@ -675,6 +676,110 @@ class TestListServiceMutation:
         assert result.outcome == WriteOutcome.UNKNOWN
         # Zero requests sent (receipt was found pending)
         assert len(transport.calls) == 0
+
+    async def test_add_item_legacy_receipt_replays_stored_outcome(
+        self, service: ListService, transport: FakeTransport, principal: Principal
+    ) -> None:
+        """R8: a migrated 'legacy' receipt with the old hash replays its stored
+        outcome, with zero calls."""
+        repo = InMemoryReceiptRepository()
+
+        transport.set_response(
+            "taskcreate",
+            "bread",
+            {"metaId": "task/123", "text": "bread", "taskListId": "taskList/1"},
+        )
+        transport.set_response(
+            "tasklist",
+            "taskList/1",
+            {
+                "listItems": [
+                    {
+                        "metaId": "task/123",
+                        "taskListId": "taskList/1",
+                        "text": "bread",
+                        "complete": "false",
+                    }
+                ]
+            },
+        )
+
+        result1, _ = await service.add_item(
+            principal, "taskList/1", "bread", "op-legacy", repo, "fam1"
+        )
+        assert result1.outcome == WriteOutcome.CONFIRMED
+
+        # Simulate a database migrated from the pre-`action` schema: the stored
+        # receipt's action becomes "legacy", but its hash is untouched.
+        stored = await repo.get(principal, "op-legacy")
+        assert stored is not None
+        await repo.put(stored.model_copy(update={"action": "legacy"}))
+
+        transport.calls.clear()
+        result2, _ = await service.add_item(
+            principal, "taskList/1", "bread", "op-legacy", repo, "fam1"
+        )
+
+        assert result2.outcome == result1.outcome
+        assert result2.item_id == result1.item_id
+        assert transport.calls == []
+
+    async def test_add_item_receipt_from_another_action_conflicts(
+        self, service: ListService, transport: FakeTransport, principal: Principal
+    ) -> None:
+        """R9: an existing receipt with action='calendar.create_event' and the same
+        operation ID is a conflict, with zero calls."""
+        repo = InMemoryReceiptRepository()
+        await repo.put(
+            OperationReceipt(
+                subject=principal.subject,
+                family_id="fam1",
+                resource_id="calendar/fam1",
+                action="calendar.create_event",
+                operation_id="op-cal",
+                payload_hash="calendar-hash",
+                status="succeeded",
+                upstream_id='{"outcome": "confirmed", "event_id": "event/1"}',
+                expires_at=datetime.now(UTC) + timedelta(hours=24),
+            )
+        )
+
+        with pytest.raises(FamilyWallError) as exc_info:
+            await service.add_item(principal, "taskList/1", "bread", "op-cal", repo, "fam1")
+        assert exc_info.value.info.code == "operation_id_conflict"
+        assert transport.calls == []
+
+    async def test_add_item_records_action_and_resource_id(
+        self, service: ListService, transport: FakeTransport, principal: Principal
+    ) -> None:
+        """R10: add_item records resource_id=<list id> and action='list.add_item'."""
+        repo = InMemoryReceiptRepository()
+        transport.set_response(
+            "taskcreate",
+            "bread",
+            {"metaId": "task/123", "text": "bread", "taskListId": "taskList/1"},
+        )
+        transport.set_response(
+            "tasklist",
+            "taskList/1",
+            {
+                "listItems": [
+                    {
+                        "metaId": "task/123",
+                        "taskListId": "taskList/1",
+                        "text": "bread",
+                        "complete": "false",
+                    }
+                ]
+            },
+        )
+
+        await service.add_item(principal, "taskList/1", "bread", "op-record", repo, "fam1")
+
+        receipt = await repo.get(principal, "op-record")
+        assert receipt is not None
+        assert receipt.resource_id == "taskList/1"
+        assert receipt.action == "list.add_item"
 
     async def test_add_item_second_item_same_list(
         self, service: ListService, transport: FakeTransport, principal: Principal
@@ -757,6 +862,12 @@ class TestListServiceMutation:
         assert len(mark_calls) == 1
         assert mark_calls[0][1]["a00taskId"] == "task/123"
         assert mark_calls[0][1]["a00complete"] == "true"
+
+        # R10: set_item_checked records resource_id=<list id> and action='list.set_checked'.
+        receipt = await repo.get(principal, "op1")
+        assert receipt is not None
+        assert receipt.resource_id == "taskList/1"
+        assert receipt.action == "list.set_checked"
 
     async def test_set_item_checked_false(
         self, service: ListService, transport: FakeTransport, principal: Principal

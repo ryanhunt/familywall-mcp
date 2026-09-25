@@ -12,6 +12,47 @@ from tests.support.doubles import FixedClock
 from familywall_mcp.models import OperationReceipt, Principal
 from familywall_mcp.storage.sqlite import SqliteReceiptRepository
 
+# Copied verbatim from the pre-migration `SqliteReceiptRepository.initialise()`, so
+# migration tests build a legacy database exactly as an older release would have.
+_LEGACY_TABLE_DDL = """
+    CREATE TABLE IF NOT EXISTS operation_receipts (
+        subject       TEXT NOT NULL,
+        operation_id  TEXT NOT NULL,
+        family_id     TEXT NOT NULL,
+        list_id       TEXT NOT NULL,
+        payload_hash  TEXT NOT NULL,
+        status        TEXT NOT NULL CHECK (
+            status IN ('pending', 'succeeded', 'unknown')
+        ),
+        upstream_id   TEXT,
+        expires_at    TEXT NOT NULL,
+        PRIMARY KEY (subject, operation_id)
+    )
+    """
+
+
+def _build_legacy_database(db_path: Path, rows: list[tuple[object, ...]]) -> None:
+    """Create a database on the exact pre-migration schema, populated with `rows`.
+
+    Each row is (subject, operation_id, family_id, list_id, payload_hash, status,
+    upstream_id, expires_at).
+    """
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(_LEGACY_TABLE_DDL)
+        conn.executemany(
+            """
+            INSERT INTO operation_receipts
+            (subject, operation_id, family_id, list_id, payload_hash,
+             status, upstream_id, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
 
 class TestSqliteReceiptRepository:
     """Tests for SqliteReceiptRepository."""
@@ -40,7 +81,8 @@ class TestSqliteReceiptRepository:
         return OperationReceipt(
             subject="user1",
             family_id="family123",
-            list_id="list456",
+            resource_id="list456",
+            action="list.add_item",
             operation_id="op001",
             payload_hash="hash123",
             status="pending",
@@ -59,7 +101,8 @@ class TestSqliteReceiptRepository:
         assert retrieved is not None
         assert retrieved.subject == receipt.subject
         assert retrieved.family_id == receipt.family_id
-        assert retrieved.list_id == receipt.list_id
+        assert retrieved.resource_id == receipt.resource_id
+        assert retrieved.action == receipt.action
         assert retrieved.operation_id == receipt.operation_id
         assert retrieved.payload_hash == receipt.payload_hash
         assert retrieved.status == receipt.status
@@ -91,7 +134,8 @@ class TestSqliteReceiptRepository:
         receipt = OperationReceipt(
             subject="user1",
             family_id="family123",
-            list_id="list456",
+            resource_id="list456",
+            action="list.add_item",
             operation_id="op001",
             payload_hash="hash123",
             status="pending",
@@ -120,7 +164,8 @@ class TestSqliteReceiptRepository:
         receipt_user1 = OperationReceipt(
             subject="user1",
             family_id="family123",
-            list_id="list456",
+            resource_id="list456",
+            action="list.add_item",
             operation_id="op001",
             payload_hash="hash123",
             status="pending",
@@ -130,7 +175,8 @@ class TestSqliteReceiptRepository:
         receipt_user2 = OperationReceipt(
             subject="user2",
             family_id="family456",
-            list_id="list789",
+            resource_id="list789",
+            action="list.add_item",
             operation_id="op001",  # Same operation_id
             payload_hash="hash456",
             status="succeeded",
@@ -164,7 +210,8 @@ class TestSqliteReceiptRepository:
         receipt1 = OperationReceipt(
             subject="user1",
             family_id="family123",
-            list_id="list456",
+            resource_id="list456",
+            action="list.add_item",
             operation_id="op001",
             payload_hash="hash123",
             status="pending",
@@ -174,7 +221,8 @@ class TestSqliteReceiptRepository:
         receipt2 = OperationReceipt(
             subject="user1",
             family_id="family123",
-            list_id="list456",
+            resource_id="list456",
+            action="list.add_item",
             operation_id="op001",
             payload_hash="hash456",  # Changed
             status="succeeded",  # Changed
@@ -204,7 +252,8 @@ class TestSqliteReceiptRepository:
         receipt = OperationReceipt(
             subject="user1",
             family_id="family123",
-            list_id="list456",
+            resource_id="list456",
+            action="list.add_item",
             operation_id="op001",
             payload_hash="hash123",
             status="pending",
@@ -233,7 +282,8 @@ class TestSqliteReceiptRepository:
         receipt = OperationReceipt(
             subject="user1",
             family_id="family123",
-            list_id="list456",
+            resource_id="list456",
+            action="list.add_item",
             operation_id="op001",
             payload_hash="hash123",
             status="pending",
@@ -253,7 +303,8 @@ class TestSqliteReceiptRepository:
         receipt_expired = OperationReceipt(
             subject="user1",
             family_id="family123",
-            list_id="list456",
+            resource_id="list456",
+            action="list.add_item",
             operation_id="op001",
             payload_hash="hash123",
             status="pending",
@@ -263,7 +314,8 @@ class TestSqliteReceiptRepository:
         receipt_live = OperationReceipt(
             subject="user1",
             family_id="family123",
-            list_id="list456",
+            resource_id="list456",
+            action="list.add_item",
             operation_id="op002",
             payload_hash="hash456",
             status="pending",
@@ -297,7 +349,8 @@ class TestSqliteReceiptRepository:
         receipt = OperationReceipt(
             subject="user1",
             family_id="family123",
-            list_id="list456",
+            resource_id="list456",
+            action="list.add_item",
             operation_id="op001",
             payload_hash="hash123",
             status="pending",
@@ -326,7 +379,8 @@ class TestSqliteReceiptRepository:
             OperationReceipt(
                 subject="user1",
                 family_id="family123",
-                list_id="list456",
+                resource_id="list456",
+                action="list.add_item",
                 operation_id=f"op{i:03d}",
                 payload_hash=f"hash{i}",
                 status="pending",
@@ -356,7 +410,8 @@ class TestSqliteReceiptRepository:
             OperationReceipt(
                 subject="user1",
                 family_id="family123",
-                list_id="list456",
+                resource_id="list456",
+                action="list.add_item",
                 operation_id="op001",
                 payload_hash=f"hash{i}",
                 status="pending",
@@ -406,15 +461,16 @@ class TestSqliteReceiptRepository:
                 conn.execute(
                     """
                     INSERT INTO operation_receipts
-                    (subject, operation_id, family_id, list_id, payload_hash,
+                    (subject, operation_id, family_id, resource_id, action, payload_hash,
                      status, upstream_id, expires_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         "user1",
                         "op001",
                         "family123",
                         "list456",
+                        "list.add_item",
                         "hash123",
                         "invalid_status",  # Invalid
                         None,
@@ -430,9 +486,9 @@ class TestSqliteReceiptRepository:
         with pytest.raises(sqlite3.IntegrityError):
             await asyncio.to_thread(_insert_invalid)
 
-    # Criterion 12: Database file is created with mode 0o600
+    # Criterion 12, R5: Database file is created with mode 0o600
     async def test_database_file_mode_0o600(self, tmp_path: Path, clock: FixedClock) -> None:
-        """Test that the database file is created with mode 0o600."""
+        """R5: a new database file is created 0600."""
         db_path = tmp_path / "mode_test.sqlite3"
         repo = SqliteReceiptRepository(db_path, clock=clock)
         await repo.initialise()
@@ -451,3 +507,355 @@ class TestSqliteReceiptRepository:
         # Check that the repository is assignable to the protocol
         _repo: ReceiptRepository = repository
         assert _repo is not None
+
+
+class TestSchemaAndMigration:
+    """Fresh-schema creation and in-place migration from the legacy `list_id` schema."""
+
+    @pytest.fixture
+    def clock(self) -> FixedClock:
+        return FixedClock(datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC))
+
+    async def test_fresh_database_has_new_schema(self, tmp_path: Path, clock: FixedClock) -> None:
+        """R1: a fresh database gets `resource_id`/`action`, and the CHECK accepts 'rejected'."""
+        import asyncio
+
+        db_path = tmp_path / "fresh.sqlite3"
+        repo = SqliteReceiptRepository(db_path, clock=clock)
+        await repo.initialise()
+
+        def _inspect_and_insert_rejected() -> set[str]:
+            conn = sqlite3.connect(str(db_path))
+            try:
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(operation_receipts)")}
+                # The CHECK constraint must accept 'rejected' without raising.
+                conn.execute(
+                    """
+                    INSERT INTO operation_receipts
+                    (subject, operation_id, family_id, resource_id, action, payload_hash,
+                     status, upstream_id, expires_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "user1",
+                        "op-rejected",
+                        "family1",
+                        "calendar/1",
+                        "calendar.create_event",
+                        "hash1",
+                        "rejected",
+                        None,
+                        clock.value.isoformat(),
+                    ),
+                )
+                conn.commit()
+                return columns
+            finally:
+                conn.close()
+
+        columns = await asyncio.to_thread(_inspect_and_insert_rejected)
+        assert "resource_id" in columns
+        assert "action" in columns
+        assert "list_id" not in columns
+        await repo.aclose()
+
+    async def test_migration_preserves_rows_field_for_field(
+        self, tmp_path: Path, clock: FixedClock
+    ) -> None:
+        """R2: migrating a legacy database keeps every row, `list_id` becomes
+        `resource_id`, and `action` is set to 'legacy'."""
+        import asyncio
+
+        db_path = tmp_path / "legacy.sqlite3"
+        rows = [
+            (
+                "user1",
+                "op-pending",
+                "family1",
+                "taskList/1",
+                "hash-pending",
+                "pending",
+                None,
+                "2099-01-01T00:00:00+00:00",
+            ),
+            (
+                "user1",
+                "op-succeeded",
+                "family1",
+                "taskList/2",
+                "hash-succeeded",
+                "succeeded",
+                '{"outcome": "confirmed"}',
+                "2099-01-02T00:00:00+00:00",
+            ),
+            (
+                "user2",
+                "op-unknown",
+                "family2",
+                "calendar/2",
+                "hash-unknown",
+                "unknown",
+                None,
+                "2099-01-03T00:00:00+00:00",
+            ),
+        ]
+        await asyncio.to_thread(_build_legacy_database, db_path, rows)
+
+        repo = SqliteReceiptRepository(db_path, clock=clock)
+        await repo.initialise()
+
+        def _read_all() -> list[tuple[object, ...]]:
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            try:
+                cursor = conn.execute(
+                    """
+                    SELECT subject, operation_id, family_id, resource_id, action, payload_hash,
+                           status, upstream_id, expires_at
+                    FROM operation_receipts
+                    ORDER BY operation_id
+                    """
+                )
+                return [tuple(row) for row in cursor.fetchall()]
+            finally:
+                conn.close()
+
+        migrated = await asyncio.to_thread(_read_all)
+        assert len(migrated) == 3
+
+        by_op_id = {row[1]: row for row in migrated}
+        for legacy_row in rows:
+            subject, operation_id, family_id, list_id, payload_hash, status = legacy_row[:6]
+            upstream_id, expires_at = legacy_row[6:]
+            row = by_op_id[operation_id]
+            assert row == (
+                subject,
+                operation_id,
+                family_id,
+                list_id,  # list_id's value now lives in resource_id
+                "legacy",  # action
+                payload_hash,
+                status,
+                upstream_id,
+                expires_at,
+            )
+        await repo.aclose()
+
+    async def test_second_initialise_is_noop(self, tmp_path: Path, clock: FixedClock) -> None:
+        """R3: a second `initialise()` leaves the schema and row count unchanged."""
+        import asyncio
+
+        db_path = tmp_path / "legacy.sqlite3"
+        expires_at = "2099-01-01T00:00:00+00:00"
+        rows = [("user1", "op1", "family1", "taskList/1", "hash1", "pending", None, expires_at)]
+        await asyncio.to_thread(_build_legacy_database, db_path, rows)
+
+        repo = SqliteReceiptRepository(db_path, clock=clock)
+        await repo.initialise()
+        await repo.initialise()  # second call: must be a no-op
+
+        def _row_count_and_columns() -> tuple[int, set[str]]:
+            conn = sqlite3.connect(str(db_path))
+            try:
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(operation_receipts)")}
+                (count,) = conn.execute("SELECT COUNT(*) FROM operation_receipts").fetchone()
+                return count, columns
+            finally:
+                conn.close()
+
+        count, columns = await asyncio.to_thread(_row_count_and_columns)
+        assert count == 1
+        assert "resource_id" in columns
+        assert "list_id" not in columns
+        await repo.aclose()
+
+    async def test_migration_failure_leaves_legacy_table_intact(
+        self, tmp_path: Path, clock: FixedClock
+    ) -> None:
+        """R4: a failure mid-migration leaves the legacy table and its rows intact,
+        and raises. Forced here by a pre-existing conflicting
+        `operation_receipts_new` table."""
+        import asyncio
+
+        db_path = tmp_path / "legacy.sqlite3"
+        expires_at = "2099-01-01T00:00:00+00:00"
+        original_row = (
+            "user1",
+            "op1",
+            "family1",
+            "taskList/1",
+            "hash1",
+            "pending",
+            None,
+            expires_at,
+        )
+        await asyncio.to_thread(_build_legacy_database, db_path, [original_row])
+
+        def _plant_conflicting_table() -> None:
+            conn = sqlite3.connect(str(db_path))
+            try:
+                conn.execute("CREATE TABLE operation_receipts_new (unrelated TEXT)")
+                conn.commit()
+            finally:
+                conn.close()
+
+        await asyncio.to_thread(_plant_conflicting_table)
+
+        repo = SqliteReceiptRepository(db_path, clock=clock)
+        with pytest.raises(sqlite3.OperationalError):
+            await repo.initialise()
+
+        def _read_legacy() -> list[tuple[object, ...]]:
+            conn = sqlite3.connect(str(db_path))
+            try:
+                # The legacy table (with its original `list_id` column) must still
+                # be readable under its original name and schema.
+                cursor = conn.execute(
+                    "SELECT subject, operation_id, family_id, list_id, payload_hash, "
+                    "status, upstream_id, expires_at FROM operation_receipts"
+                )
+                return cursor.fetchall()
+            finally:
+                conn.close()
+
+        surviving_rows = await asyncio.to_thread(_read_legacy)
+        assert surviving_rows == [original_row]
+        await repo.aclose()
+
+    async def test_rejected_status_round_trips(self, tmp_path: Path, clock: FixedClock) -> None:
+        """R6: 'rejected' round-trips through the SQLite store."""
+        db_path = tmp_path / "rejected.sqlite3"
+        repo = SqliteReceiptRepository(db_path, clock=clock)
+        await repo.initialise()
+
+        principal = Principal(subject="user1")
+        rejected = OperationReceipt(
+            subject="user1",
+            family_id="family1",
+            resource_id="calendar/1",
+            action="calendar.create_event",
+            operation_id="op-rejected",
+            payload_hash="hash1",
+            status="rejected",
+            upstream_id='{"code": "upstream_rejected", "message": "no", "recovery": "retry"}',
+            expires_at=clock.value + timedelta(hours=1),
+        )
+        await repo.put(rejected)
+        retrieved = await repo.get(principal, "op-rejected")
+
+        assert retrieved is not None
+        assert retrieved.status == "rejected"
+        assert retrieved.upstream_id == rejected.upstream_id
+        await repo.aclose()
+
+    async def test_tenant_isolation_after_migration(
+        self, tmp_path: Path, clock: FixedClock
+    ) -> None:
+        """R7: (subject, operation_id) isolation still holds after migration."""
+        import asyncio
+
+        db_path = tmp_path / "legacy.sqlite3"
+        rows = [
+            (
+                "user1",
+                "op-shared",
+                "family1",
+                "taskList/1",
+                "hash-user1",
+                "succeeded",
+                '{"outcome": "confirmed"}',
+                "2099-01-01T00:00:00+00:00",
+            ),
+            (
+                "user2",
+                "op-shared",  # same operation_id, different subject
+                "family2",
+                "taskList/2",
+                "hash-user2",
+                "pending",
+                None,
+                "2099-01-02T00:00:00+00:00",
+            ),
+        ]
+        await asyncio.to_thread(_build_legacy_database, db_path, rows)
+
+        repo = SqliteReceiptRepository(db_path, clock=clock)
+        await repo.initialise()
+
+        retrieved1 = await repo.get(Principal(subject="user1"), "op-shared")
+        retrieved2 = await repo.get(Principal(subject="user2"), "op-shared")
+
+        assert retrieved1 is not None
+        assert retrieved2 is not None
+        assert retrieved1.resource_id == "taskList/1"
+        assert retrieved1.status == "succeeded"
+        assert retrieved2.resource_id == "taskList/2"
+        assert retrieved2.status == "pending"
+        await repo.aclose()
+
+    async def test_purge_expired_after_migration(self, tmp_path: Path, clock: FixedClock) -> None:
+        """R14: `purge_expired` still works after migration."""
+        import asyncio
+
+        db_path = tmp_path / "legacy.sqlite3"
+        expired_at = (clock.value - timedelta(hours=1)).isoformat()
+        live_at = (clock.value + timedelta(hours=1)).isoformat()
+        rows = [
+            ("user1", "op-expired", "family1", "taskList/1", "hash1", "pending", None, expired_at),
+            ("user1", "op-live", "family1", "taskList/2", "hash2", "pending", None, live_at),
+        ]
+        await asyncio.to_thread(_build_legacy_database, db_path, rows)
+
+        repo = SqliteReceiptRepository(db_path, clock=clock)
+        await repo.initialise()
+        await repo.purge_expired()
+
+        principal = Principal(subject="user1")
+        assert await repo.get(principal, "op-expired") is None
+        live = await repo.get(principal, "op-live")
+        assert live is not None
+        assert live.operation_id == "op-live"
+        await repo.aclose()
+
+
+def test_migration_rechecks_schema_under_the_write_lock(tmp_path: Path) -> None:
+    """A migration that loses the race to another process is a no-op, not an error.
+
+    Both processes can see the legacy schema before either takes the write lock;
+    the loser must re-check once it holds the lock instead of rebuilding a table
+    that has already been migrated.
+    """
+    from familywall_mcp.storage.sqlite import _migrate_legacy_table
+
+    db_path = tmp_path / "raced.sqlite3"
+    _build_legacy_database(
+        db_path,
+        [
+            (
+                "user1",
+                "op-1",
+                "fam1",
+                "list1",
+                "hash1",
+                "succeeded",
+                None,
+                "2099-01-01T00:00:00+00:00",
+            )
+        ],
+    )
+    winner = sqlite3.connect(str(db_path))
+    try:
+        _migrate_legacy_table(winner)
+    finally:
+        winner.close()
+
+    loser = sqlite3.connect(str(db_path))
+    try:
+        _migrate_legacy_table(loser)
+        columns = {row[1] for row in loser.execute("PRAGMA table_info(operation_receipts)")}
+        rows = loser.execute("SELECT resource_id, action FROM operation_receipts").fetchall()
+    finally:
+        loser.close()
+
+    assert "resource_id" in columns and "list_id" not in columns
+    assert rows == [("list1", "legacy")]
