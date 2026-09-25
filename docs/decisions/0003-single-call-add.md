@@ -36,8 +36,8 @@ auto-deleting or auto-retrying still applies, now to a state this server did
 not create either.
 
 Everyone is sent as `toAll=true` plus an `assignee.N` for every member — the
-encoding probe A2 verified on `taskupdate2` and extrapolated, not directly
-observed, onto `taskcreate2`. The service's readback compares the created
+encoding probe A2 verified on `taskupdate2`, and slice G (2026-09-25)
+confirmed on `taskcreate2` itself. The service's readback compares the created
 item's assignment against the request (decision 5 of brief 09F) and reports
 a new `mismatched` outcome if the server disagrees, so an unverified
 extrapolation is caught rather than silently trusted.
@@ -58,10 +58,9 @@ extrapolation is caught rather than silently trusted.
   `operation_id_conflict` instead of a stale outcome. This is safe — no
   duplicate item is created either way — and is called out explicitly so it
   is not mistaken for a regression.
-- The everyone encoding on `taskcreate2` is extrapolated, not live-verified;
-  the lead verifies it live before merge (brief 09F's handoff target), and
-  the readback's `mismatched` outcome is the safety net if the extrapolation
-  is wrong.
+- The everyone encoding on `taskcreate2` was live-verified in slice G
+  (2026-09-25); the readback's `mismatched` outcome remains the safety net if
+  the server ever changes.
 - `set_list_item_assignees` (new, brief 09F) reuses the same
   pending/succeeded/rejected/replay receipt pattern, via a single partial
   `taskupdate2`, verifying list membership before any write since the

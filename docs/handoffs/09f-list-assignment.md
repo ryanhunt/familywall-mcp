@@ -298,12 +298,8 @@ Run from `/Users/ryan/dev/familywall-mcp/.claude/worktrees/slice-f`:
 
 ## Known limitations
 
-- **The everyone encoding on `taskcreate2` is extrapolated, not
-  live-verified.** Probe A2 verified `toAll=true` + every member's
-  `assignee.N` on `taskupdate2`; the same encoding on `taskcreate2` is
-  assumed, and the readback's `mismatched` outcome is the safety net if the
-  server disagrees. This is exactly the handoff target: the lead's live
-  check (slice G).
+- The everyone encoding on `taskcreate2`, extrapolated when this slice was
+  written, was live-verified in slice G.
 - `add_list_item`'s new single-call behaviour and `set_list_item_assignees`
   are both offline/unit-tested only; neither has been exercised against a
   real FamilyWall account yet.
@@ -332,3 +328,12 @@ particular that the everyone encoding on `taskcreate2` reads back as
 expected (or that `mismatched` correctly catches it if not), then clean up
 by exact ID and update `docs/compatibility.md`/`docs/contracts/familywall.md`
 accordingly.
+
+## Lead review and live verification (2026-09-25)
+
+The lead also recorded the acknowledgement before the readback in both list
+writes (with a crash-during-readback test) and merged the resolution helper
+with slice E's. Reviewed against the brief; the required tests are present and the suite passes
+on the combined branch. Live acceptance (slice G, authorised by the account
+owner) on disposable data, deleted by exact ID afterwards with nothing left
+behind: see `docs/handoffs/09g-live-acceptance.md`.

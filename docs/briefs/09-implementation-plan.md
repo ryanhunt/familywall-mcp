@@ -72,9 +72,9 @@ gate, file boundary, acceptance criteria and who should implement it under the
 | B | Member resolver, `list_family_members`, assignment read models | — | **done 2026-09-25** |
 | D | Generalized receipts and migration | — | **done 2026-09-25** |
 | C | Attendees on `create_calendar_event`, default everyone | A1, B | **done 2026-09-25**, offline |
-| E | `set_calendar_event_attendees` | A1, B, D | **done 2026-09-25**, offline |
-| F | List assignment, single-call `taskcreate2` add, `set_list_item_assignees` | A2, B, D | **done 2026-09-25**, offline |
-| G | Live acceptance and docs | each slice | per slice |
+| E | `set_calendar_event_attendees` | A1, B, D | **done 2026-09-25** |
+| F | List assignment, single-call `taskcreate2` add, `set_list_item_assignees` | A2, B, D | **done 2026-09-25** |
+| G | Live acceptance and docs | each slice | **done 2026-09-25** |
 
 Each slice is one PR. B and D can run in parallel with the probes.
 
@@ -416,6 +416,10 @@ Files: `familywall/lists.py`, `services/lists.py`, `models.py`,
 ## Slice G — Live acceptance and documentation
 
 **Implementer:** lead.
+
+**Status: done 2026-09-25.** Every new and changed tool returned `confirmed`
+live on disposable data, deleted afterwards; see
+[handoff 09G](../handoffs/09g-live-acceptance.md).
 
 Run every new tool once against the live account, the same way handoff 10 did:
 disposable data, then an exact-ID cleanup. Then update README, PROGRESS,
