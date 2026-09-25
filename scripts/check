@@ -18,12 +18,18 @@ uv build
 # `generated_at`, and always restore the pre-scan file afterwards so the
 # tree never ends up dirty; only fail (after restoring) if the actual
 # findings changed.
+#
+# `--all-files` also walks untracked and ignored paths, so exclude local-only
+# ones: agent worktrees under `.claude/`, and git-ignored `.env`/`.env.*`
+# credential files (but keep scanning the tracked `.env.example`). Findings in
+# those would otherwise land in the committed baseline and make the check
+# depend on what happens to exist in a given checkout.
 baseline=.secrets.baseline
 baseline_before="$(mktemp)"
 trap 'rm -f "$baseline_before"' EXIT
 cp "$baseline" "$baseline_before"
 uv run detect-secrets scan --baseline "$baseline" --all-files \
-  --exclude-files '(^|/)(uv\.lock|\.git/|\.venv/|\.mypy_cache/|\.pytest_cache/|\.ruff_cache/|\.uv-cache/|dist/)' \
+  --exclude-files '(^|/)(uv\.lock|\.git/|\.venv/|\.mypy_cache/|\.pytest_cache/|\.ruff_cache/|\.uv-cache/|dist/|\.claude/|\.env(\.(?!example$)[^/]*)?$)' \
   >/dev/null
 if uv run python3 -c "
 import json, sys
