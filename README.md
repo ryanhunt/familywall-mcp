@@ -112,7 +112,7 @@ actual clone path.
         "FAMILYWALL_LOCAL_SUBJECT": "your-name",
         "FAMILYWALL_BASE_URL": "https://api.familywall.com",
         "FAMILYWALL_EMAIL": "you@example.com",
-        "FAMILYWALL_PASSWORD": "yourpassword",
+        "FAMILYWALL_PASSWORD": "<your FamilyWall account password>",
         "FAMILYWALL_ENABLE_WRITES": "false"
       }
     }
