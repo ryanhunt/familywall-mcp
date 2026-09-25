@@ -2,9 +2,16 @@
 # necessary artifacts to slim runtime image to reduce final image size.
 
 # Stage 1: Builder - compile dependencies
-FROM python:3.12-slim as builder
+FROM python:3.12-slim AS builder
 
 WORKDIR /app
+
+# Build tools for compiling C extensions (e.g. cffi/cryptography) on
+# architectures without prebuilt manylinux wheels, such as linux/arm/v7.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libffi-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install uv package manager for fast, reproducible builds
 RUN pip install --no-cache-dir uv
