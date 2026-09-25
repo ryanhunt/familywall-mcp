@@ -320,9 +320,10 @@ instants, `timeZone`, `allDay`, the reminder, `private` and `recurrency`
 unchanged. The attendee list became **exactly** the entries sent: the attendee
 set is replaced, not merged (2026-09-25).
 
-Not observed: whether a non-empty `where` or `description` survives an update
-that omits it (the test event had neither), `evtupdate` on an all-day event, and
-any recurring event. On a recurring event `option=All` presumably updates the
+A non-empty `where` and `description` also survive an update that omits them:
+in slice G (2026-09-25) `set_calendar_event_attendees` changed the attendees of
+an event carrying both, twice, and each readback was `confirmed` with neither
+changed. Not observed: `evtupdate` on an all-day event, and any recurring event. On a recurring event `option=All` presumably updates the
 whole series. `$empty` appears to be a sentinel for an omitted value; its exact
 meaning is `source-only`.
 
@@ -374,6 +375,5 @@ Still `pending-live`:
    preserved, so this is a presentation question, not a correctness one.
 2. **Whether a silent result cap exists** above 1115 events. The port bounds its
    own window regardless.
-3. **Remaining write questions** — whether `evtupdate` keeps a non-empty
-   `where`/`description` it was not sent, `evtupdate` on an all-day event, and
+3. **Remaining write questions** — `evtupdate` on an all-day event, and
    any write to a recurring series or occurrence.

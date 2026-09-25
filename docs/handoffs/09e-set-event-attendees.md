@@ -287,8 +287,6 @@ Named (`to_all=False`, IDs `("acct-synthetic-2", "acct-synthetic-1")`, in that o
 
 ## Known limitations
 
-- Not yet live-verified. This slice is offline only (synthetic fixtures, no
-  live network), per the brief; the lead's live check is slice G, next.
 - All-day event *updates* stay unsupported, as decided (probe A1 found no
   write-side `allDay` field to safely target); an all-day event is refused
   by the same safety gate that refuses a recurring or special-calendar event.
@@ -312,3 +310,10 @@ by the documented updates slice G's own acceptance criteria call for (README,
 PROGRESS, architecture, compatibility, `AGENTS.md`'s tool count) — most of
 which this handoff already updated for slice E specifically. Then slice F
 (list assignment).
+
+## Lead review and live verification (2026-09-25)
+
+Reviewed against the brief; the required tests are present and the suite passes
+on the combined branch. Live acceptance (slice G, authorised by the account
+owner) on disposable data, deleted by exact ID afterwards with nothing left
+behind: see `docs/handoffs/09g-live-acceptance.md`.

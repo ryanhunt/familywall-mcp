@@ -46,14 +46,9 @@ same policy.
    and run the project-defined checks: `uv sync --frozen --group dev`,
    `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy src`,
    `uv run pytest -m 'not live'`, `uv build`, and `scripts/check`. Live tests
-   remain opt-in. Of the ten MCP tools, list read, `set_list_item_checked`,
-   calendar read and timed calendar-event create are implemented and
-   live-verified against a real FamilyWall account. `list_family_members`,
-   `add_list_item`'s single-call `taskcreate2` behaviour (see
-   [ADR 0003](docs/decisions/0003-single-call-add.md)),
-   `set_list_item_assignees` and `set_calendar_event_attendees` are
-   implemented and unit-tested but not yet
-   live-verified, and the OAuth provider and hosted mode are not.
+   remain opt-in. All ten MCP tools are implemented and live-verified against
+   a real FamilyWall account (see `docs/compatibility.md`); the OAuth
+   provider and hosted mode are not live-verified.
 
 ## Security and data handling
 

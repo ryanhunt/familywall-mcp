@@ -86,7 +86,12 @@ write endpoint was called. Findings are recorded in
 | `evtupdate` attendee-only | **pass** — 2026-09-25; patch semantics: other fields unchanged, attendee set replaced by exactly the entries sent |
 | `create_calendar_event` daylight-saving instant | **pass** — 2026-09-25; `+11:00` stored correctly, `confirmed` |
 | `create_calendar_event` for everyone and for named members, with the default reminder | **pass** — 2026-09-25; both `confirmed` through the tool; readback `toAll` and attendees as sent, `SNOOZE`/`MINUTE`/`30` reminder |
-| `evtupdate` keeps an unsent non-empty `where`/`description`; all-day update | **pending** |
+| `set_calendar_event_attendees` to named members and back to everyone | **pass** — 2026-09-25 (slice G); both `confirmed`, every other field unchanged |
+| `add_list_item` single-call `taskcreate2`, everyone (default list) and named (non-default list) | **pass** — 2026-09-25 (slice G); both `confirmed`, no `taskmove` |
+| `set_list_item_assignees` to everyone and to one member | **pass** — 2026-09-25 (slice G); both `confirmed`, other fields unchanged |
+| `list_family_members` | **pass** — 2026-09-25 (slice G); five members, exactly one marked as you, no upstream call |
+| `evtupdate` keeps an unsent non-empty `where`/`description` | **pass** — 2026-09-25 (slice G); both unchanged across two attendee-only updates |
+| `evtupdate` on an all-day event | **pending** — refused by `set_calendar_event_attendees` until observed |
 | Task assignment: named and everyone (`taskupdate2`) | **pass** — 2026-09-25; `toAll` plus `assignee.N`; everyone reads back as every member |
 | `taskupdate2` partial update | **pass** — 2026-09-25; patch semantics: only the assignment changed; `description`, `dueDate` and reminder kept |
 | `taskmove` keeps assignment | **pass** — 2026-09-25; assignment, description, due date and reminder kept |

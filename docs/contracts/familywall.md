@@ -560,6 +560,9 @@ non-default list's `taskListId`, `toAll=false` and `assignee.0` created the item
 in that list with exactly that assignee, in one call. `taskcreate` still has no
 list parameter (the 2026-09-14 finding stands for that endpoint), but
 `taskcreate2` makes the non-atomic create-then-move of ADR 0002 avoidable.
+Slice G (2026-09-25) confirmed the everyone encoding on `taskcreate2` as well:
+`toAll=true` plus every `assignee.N` created an item that read back as assigned
+to everyone.
 
 **Reads.** `dueDate` and `description` appear on task objects once they are set.
 Earlier samples lacked them only because they were unset. The reminder reads
