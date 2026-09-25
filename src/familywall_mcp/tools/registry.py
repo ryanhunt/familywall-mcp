@@ -8,13 +8,16 @@ from typing import Literal
 
 from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
+from pydantic import ValidationError
 
 from familywall_mcp.config import AppConfig
 from familywall_mcp.errors import FamilyWallError
 from familywall_mcp.interfaces import ReceiptRepository
 from familywall_mcp.models import DomainModel
+from familywall_mcp.services.calendar import CalendarService, NewTimedEvent
 from familywall_mcp.services.lists import ListService
 from familywall_mcp.services.principal_context import ContextResolver
+from familywall_mcp.services.ranges import resolve_event_time
 from familywall_mcp.services.session import SessionPool
 from familywall_mcp.services.transport import read_transport, write_transport
 
@@ -92,6 +95,22 @@ class SetListItemCheckedResponse(DomainModel):
 
     family_name: str
     outcome: str
+
+
+class CreateCalendarEventResponse(DomainModel):
+    """Response from create_calendar_event."""
+
+    family_name: str
+    outcome: str
+    event_id: str | None
+    assigned_to: str
+    timezone: str
+    start: str  # local ISO datetime as requested
+    end: str
+    # Populated if and only if outcome is mismatched:
+    mismatched_fields: tuple[str, ...] = ()
+    actual_start: str | None = None  # what the readback shows
+    actual_end: str | None = None
 
 
 class ErrorResponse(DomainModel):
@@ -182,6 +201,20 @@ class ToolRegistry:
             description="Mark a list item as checked or unchecked.",
             annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
         )(self._set_list_item_checked)
+
+        server.tool(
+            name="create_calendar_event",
+            description=(
+                "Create one timed, non-recurring event on the family calendar, assigned "
+                "to the signed-in member. start and end are local times such as "
+                "2026-10-06T10:00 in timezone (default: the member's FamilyWall timezone), "
+                "or RFC 3339 times with an offset. All-day and recurring events and other "
+                "attendees are not supported. Outcome is confirmed only when a readback "
+                "matches the request; mismatched means the event exists but differs. "
+                "Without idempotency_key, retries will create duplicate events."
+            ),
+            annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
+        )(self._create_calendar_event)
 
     async def _get_connection_status(self) -> ConnectionStatusResponse | ErrorResponse:
         """Get the connection status and authenticated member's timezone.
@@ -440,3 +473,100 @@ class ToolRegistry:
                 error_message=exc.info.message,
                 error_recovery=exc.info.recovery,
             )
+
+    async def _create_calendar_event(
+        self,
+        title: str,
+        start: str,
+        end: str,
+        timezone: str | None = None,
+        location: str | None = None,
+        description: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> CreateCalendarEventResponse | ErrorResponse:
+        """Create a timed event on the family calendar, assigned to the signed-in member.
+
+        If writes are disabled, returns an error response with zero upstream calls.
+        Invalid input is rejected before any write.
+
+        Args:
+            title: The event title.
+            start: Local datetime in ``timezone``, or an RFC 3339 datetime with offset.
+            end: Exclusive end, in the same forms as ``start``.
+            timezone: IANA timezone; defaults to the authenticated member's timezone.
+            location: Optional location.
+            description: Optional description.
+            idempotency_key: Optional operation ID for idempotency; generates UUID if not provided.
+
+        Returns:
+            CreateCalendarEventResponse on success, or ErrorResponse on failure.
+        """
+        # Write gate: check if writes are enabled BEFORE any upstream call
+        if not self._config.enable_writes:
+            return ErrorResponse(
+                error_code="writes_disabled",
+                error_message="Write operations are disabled.",
+                error_recovery="Set FAMILYWALL_ENABLE_WRITES=true to enable writes.",
+            )
+
+        try:
+            principal, ctx = await self._context_resolver.resolve()
+            resolved_timezone = timezone or ctx.authenticated_member_timezone
+
+            try:
+                request = NewTimedEvent(
+                    title=title,
+                    start=resolve_event_time(start, resolved_timezone),
+                    end=resolve_event_time(end, resolved_timezone),
+                    timezone=resolved_timezone,
+                    location=location,
+                    description=description,
+                )
+            except ValidationError as exc:
+                return _invalid_event("; ".join(error["msg"] for error in exc.errors()))
+            except ValueError as exc:
+                return _invalid_event(str(exc))
+
+            transport = write_transport(self._session_pool, principal)
+            service = CalendarService(transport)
+
+            # Generate operation ID if not provided
+            operation_id = idempotency_key or str(uuid.uuid4())
+
+            result = await service.create_event(
+                principal,
+                request,
+                operation_id,
+                self._receipt_repository,
+                ctx.family_context,
+            )
+
+            members = ctx.discovered_family.members
+            assigned_to = next((m.display_name for m in members if m.is_authenticated_member), "")
+            return CreateCalendarEventResponse(
+                family_name=ctx.discovered_family.name,
+                outcome=result.outcome.value,
+                event_id=result.event_id,
+                assigned_to=assigned_to,
+                timezone=request.timezone,
+                start=request.start.isoformat(),
+                end=request.end.isoformat(),
+                mismatched_fields=result.mismatched_fields,
+                actual_start=result.actual_start,
+                actual_end=result.actual_end,
+            )
+        except FamilyWallError as exc:
+            return ErrorResponse(
+                error_code=exc.info.code,
+                error_message=exc.info.message,
+                error_recovery=exc.info.recovery,
+            )
+
+
+def _invalid_event(detail: str) -> ErrorResponse:
+    """Describe a rejected event request; nothing was sent upstream."""
+    return ErrorResponse(
+        error_code="invalid_event",
+        error_message="The event details are not valid; no event was created.",
+        error_recovery=f"Correct the request and try again ({detail}).",
+    )

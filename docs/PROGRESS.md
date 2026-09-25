@@ -34,6 +34,7 @@ custom connector over HTTPS; see compatibility table below.
 | — | stdio server entry point and local smoke test | `server.py`, `cli.py` | not started |
 | P5 | OAuth + static multi-user config | `auth/provider.py`, `OAuthSqliteStore`, `FAMILYWALL_USER_<N>_*` env vars | **done**: `config.py`, `auth/provider.py` implemented and unit-tested; live-verified via ASGI tests with fake credentials |
 | P6 | Containers and HTTPS | `Dockerfile`, `docker-compose.prod.yml`, `Caddyfile.example` | **done**: `uv sync --frozen --no-dev` (the Dockerfile's install step) and the resulting `familywall-mcp serve` process were run directly and answer `/health`; `docker build`/`docker compose` itself was not run (no Docker available in this environment) — verify a real image build before relying on it in production; not yet verified against real Claude/ChatGPT over HTTPS |
+| — | **`create_calendar_event`** (timed, non-recurring, assigned to the signed-in member) | `familywall/calendar.py`, `services/calendar.py`, `services/ranges.py`, `tools/registry.py`; [handoff](handoffs/10-create-calendar-event.md) | **done**: live-verified 2026-09-25 (create, readback `confirmed`, cleanup delete) |
 | P7 | Acceptance and release | — | not started |
 
 ## What 02P settled, and what it changed
@@ -95,12 +96,13 @@ FAMILYWALL_PASSWORD=<account password>
 FAMILYWALL_ENABLE_WRITES=false
 ```
 
-Then `uv run familywall-mcp serve`, which speaks MCP over stdio. Six tools are
+Then `uv run familywall-mcp serve`, which speaks MCP over stdio. Seven tools are
 exposed: `get_connection_status`, `list_shopping_lists`, `get_list_items`,
-`get_week_overview`, `add_list_item` and `set_list_item_checked`.
+`get_week_overview`, `add_list_item`, `set_list_item_checked` and
+`create_calendar_event`.
 
 **The write gate is off by default and must stay off until a live write check
-has been run deliberately.** With it off, the two write tools are still listed
+has been run deliberately.** With it off, the three write tools are still listed
 but refuse before any upstream request with `writes_disabled`.
 
 ### Live verification, 2026-09-14
@@ -115,6 +117,15 @@ refused with `writes_disabled`, and an endpoint audit of the whole run recorded
 only `taskgettasklists`, `tasklist` and `evtlistinterval` — no write endpoint was
 reached.
 
+### Live verification, 2026-09-25 — `create_calendar_event`
+
+Authorised by the account owner. The real tool created one disposable timed
+event assigned to the authenticated member: `evtcreate` then `evtlistinterval`,
+outcome `confirmed`, stored at exactly the requested instant in
+`Australia/Sydney`. The event was then deleted by exact ID with `evtdelete`
+(`"true"`, absent on readback). Details are in the
+[calendar contract](contracts/calendar.md#mutations).
+
 ## Still `pending-live`
 
 Recorded so they are not quietly dropped:
@@ -124,6 +135,8 @@ Recorded so they are not quietly dropped:
   `false` honoured), but its returned payload was never inspected. Low value to
   close: the service re-reads the list to confirm state either way.
 - Multi-day all-day encoding — needs a deliberately created test event.
+- Calendar create beyond one timed, single-attendee event: all-members and
+  multiple attendees, all-day create, and a daylight-saving-period instant.
 - Multi-family discovery shape — the probe account has one family, so the
   single-family refusal must fail closed on anything unexpected.
 

@@ -230,3 +230,54 @@ def all_day_overlaps(
     # Window spans [window_start_date, window_last_included_date] inclusive
     # So overlap is: start_date <= window_last_included_date and end_date >= window_start_date
     return start_date <= window_last_included_date and end_date >= window_start_date
+
+
+def resolve_event_time(value: str, timezone: str) -> datetime:
+    """Resolve a timed event's start or end into an aware datetime in ``timezone``.
+
+    Unlike ``parse_boundary_input``, a naive value is accepted here: an event's
+    wall-clock time is the natural input, and the zone it is read in is an
+    explicit, reported parameter rather than an assumption. Offset-aware values
+    are converted into ``timezone`` so the event is stored in its own zone.
+
+    Accepts:
+    - RFC 3339 datetime with offset (e.g., "2026-10-06T10:00:00+11:00")
+    - Local wall-clock datetime (e.g., "2026-10-06T10:00"), read in ``timezone``
+
+    Rejects:
+    - Bare dates (all-day event creation is not supported)
+    - Local times that do not exist (a daylight-saving gap) or that occur twice
+      (a daylight-saving overlap), rather than guessing which instant was meant
+    - Unknown timezones and malformed strings
+
+    Args:
+        value: The input string.
+        timezone: IANA timezone name the event belongs to.
+
+    Returns:
+        A timezone-aware datetime in ``timezone``.
+
+    Raises:
+        ValueError: For any rejected input.
+    """
+    if timezone not in available_timezones():
+        raise ValueError(f"unknown timezone: {timezone}")
+    tz = ZoneInfo(timezone)
+
+    if len(value) == 10 and value.count("-") == 2:
+        raise ValueError(f"a time is required; all-day events are not supported: {value}")
+
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as e:
+        raise ValueError(f"invalid local datetime or RFC 3339 instant: {value}") from e
+
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(tz)
+
+    earlier = parsed.replace(tzinfo=tz, fold=0)
+    later = parsed.replace(tzinfo=tz, fold=1)
+    if earlier.utcoffset() != later.utcoffset():
+        # A gap and an overlap both give the two folds different offsets.
+        raise ValueError(f"local time is skipped or repeated by a daylight-saving change: {value}")
+    return earlier

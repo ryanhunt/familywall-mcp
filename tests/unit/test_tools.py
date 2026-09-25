@@ -7,11 +7,13 @@ from datetime import UTC, date, datetime
 import pytest
 
 from familywall_mcp.config import AppConfig
+from familywall_mcp.errors import UpstreamRejectedError
 from familywall_mcp.familywall.discovery import DiscoveredFamily, FamilyMember
 from familywall_mcp.models import FamilyContext, Principal
 from familywall_mcp.services.principal_context import FixedContextResolver, PrincipalContext
 from familywall_mcp.storage.memory import InMemoryReceiptRepository
 from familywall_mcp.tools.registry import (
+    CreateCalendarEventResponse,
     ErrorResponse,
     ToolRegistry,
 )
@@ -23,6 +25,7 @@ class FakeSessionPool:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, dict[str, str], str]] = []
         self.created_items: dict[str, dict[str, object]] = {}  # metaId -> item info
+        self.created_events: list[dict[str, str]] = []  # evtcreate forms, in order
 
     async def call(
         self,
@@ -93,11 +96,42 @@ class FakeSessionPool:
             return {"ok": True}
         elif endpoint == "taskmark":
             return {"ok": True}
+        elif endpoint == "evtcreate":
+            self.created_events.append(fields)
+            return {"eventId": f"event/{len(self.created_events)}", "text": fields["text"]}
+        elif endpoint == "evtlistinterval":
+            return [
+                _stored_event(f"event/{index}", form)
+                for index, form in enumerate(self.created_events, start=1)
+            ]
         return {"synthetic": "result"}
 
     async def aclose(self) -> None:
         """Close the pool."""
         pass
+
+
+def _stored_event(event_id: str, form: dict[str, str]) -> dict[str, str]:
+    """How an evtcreate form reads back: instants re-stamped in UTC."""
+
+    def utc(value: str) -> str:
+        return datetime.fromisoformat(value).astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    return {
+        "eventId": event_id,
+        "eventMasterId": event_id,
+        "occurenceIndex": "0",
+        "text": form["text"],
+        "startDate": utc(form["startDate"]),
+        "endDate": utc(form["endDate"]),
+        "allDay": "false",
+        "timeZone": form["timeZone"],
+        "recurrency": form["recurrency"],
+        "eventType": "UNKNOWN",
+        "calendarId": "calendar/1",
+        "where": form["where"],
+        "description": form["description"],
+    }
 
 
 class FakeCalendarService:
@@ -452,3 +486,152 @@ async def test_add_list_item_with_idempotency_uses_receipt_repo() -> None:
     # Verify receipt was stored
     receipt = await receipt_repo.get(principal, "test-key-123")
     assert receipt is not None
+
+
+def _writes_config(enabled: bool) -> AppConfig:
+    return AppConfig.from_env(
+        {
+            "FAMILYWALL_LOCAL_SUBJECT": "test-local-user",
+            "FAMILYWALL_MODE": "stdio",
+            "FAMILYWALL_ENABLE_WRITES": "true" if enabled else "false",
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_calendar_event_is_blocked_by_the_write_gate() -> None:
+    """With writes disabled, nothing is resolved or sent."""
+    registry, pool = create_registry(_writes_config(False), create_discovered_family())
+
+    result = await registry._create_calendar_event(
+        "Dentist", "2026-10-06T10:00", "2026-10-06T11:00"
+    )
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error_code == "writes_disabled"
+    assert pool.calls == []
+
+
+@pytest.mark.asyncio
+async def test_create_calendar_event_confirms_in_the_members_timezone() -> None:
+    """Local times default to the member's zone; create and readback use write mode."""
+    registry, pool = create_registry(_writes_config(True), create_discovered_family())
+
+    result = await registry._create_calendar_event(
+        "Dentist",
+        "2026-10-06T10:00",
+        "2026-10-06T11:00",
+        location="Main St",
+        idempotency_key="op-cal-1",
+    )
+
+    assert isinstance(result, CreateCalendarEventResponse)
+    assert result.outcome == "confirmed"
+    assert result.event_id == "event/1"
+    assert result.assigned_to == "Test Member"
+    assert result.timezone == "Australia/Sydney"
+    assert result.start == "2026-10-06T10:00:00+11:00"
+    assert result.end == "2026-10-06T11:00:00+11:00"
+    assert [(call[1], call[3]) for call in pool.calls] == [
+        ("evtcreate", "write"),
+        ("evtlistinterval", "write"),
+    ]
+    form = pool.calls[0][2]
+    assert form["attendee.0.accountId"] == "acct/1"
+    assert "Test Member" not in form.values()
+
+
+@pytest.mark.asyncio
+async def test_create_calendar_event_honours_an_explicit_timezone() -> None:
+    registry, pool = create_registry(_writes_config(True), create_discovered_family())
+
+    result = await registry._create_calendar_event(
+        "Call", "2026-10-06T10:00", "2026-10-06T10:30", timezone="Europe/London"
+    )
+
+    assert isinstance(result, CreateCalendarEventResponse)
+    assert result.outcome == "confirmed"
+    assert pool.calls[0][2]["startDate"] == "2026-10-06T10:00:00+01:00"
+    assert pool.calls[0][2]["timeZone"] == "Europe/London"
+
+
+@pytest.mark.asyncio
+async def test_create_calendar_event_replays_an_idempotency_key() -> None:
+    registry, pool = create_registry(_writes_config(True), create_discovered_family())
+
+    first = await registry._create_calendar_event(
+        "Dentist", "2026-10-06T10:00", "2026-10-06T11:00", idempotency_key="op-cal-1"
+    )
+    calls_after_first = len(pool.calls)
+    second = await registry._create_calendar_event(
+        "Dentist", "2026-10-06T10:00", "2026-10-06T11:00", idempotency_key="op-cal-1"
+    )
+
+    assert isinstance(second, CreateCalendarEventResponse)
+    assert second.outcome == first.outcome == "confirmed"
+    assert len(pool.calls) == calls_after_first
+    assert len(pool.created_events) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("title", "start", "end", "timezone"),
+    [
+        ("Dentist", "2026-10-06T11:00", "2026-10-06T10:00", None),  # end before start
+        ("Dentist", "2026-10-04T02:30", "2026-10-04T04:00", None),  # Sydney DST gap
+        ("Dentist", "2026-10-06", "2026-10-07", None),  # all-day
+        ("Dentist", "2026-10-06T10:00", "2026-10-06T11:00", "Mars/Base"),  # unknown zone
+        ("   ", "2026-10-06T10:00", "2026-10-06T11:00", None),  # blank title
+        ("Dentist", "tomorrow", "2026-10-06T11:00", None),  # unparseable
+    ],
+)
+async def test_create_calendar_event_rejects_invalid_input_before_any_call(
+    title: str, start: str, end: str, timezone: str | None
+) -> None:
+    registry, pool = create_registry(_writes_config(True), create_discovered_family())
+
+    result = await registry._create_calendar_event(title, start, end, timezone=timezone)
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error_code == "invalid_event"
+    assert pool.calls == []
+
+
+@pytest.mark.asyncio
+async def test_create_calendar_event_reports_a_refused_create() -> None:
+    class RefusingPool(FakeSessionPool):
+        async def call(
+            self, principal: Principal, endpoint: str, fields: dict[str, str], read_write: str
+        ) -> object:
+            if endpoint == "evtcreate":
+                self.calls.append((principal.subject, endpoint, fields, read_write))
+                raise UpstreamRejectedError()
+            return await super().call(principal, endpoint, fields, read_write)
+
+    registry, _ = create_registry(_writes_config(True), create_discovered_family())
+    pool = RefusingPool()
+    registry._session_pool = pool  # type: ignore[assignment]
+
+    result = await registry._create_calendar_event(
+        "Dentist", "2026-10-06T10:00", "2026-10-06T11:00"
+    )
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error_code == "upstream_rejected"
+    assert [call[1] for call in pool.calls] == ["evtcreate"]
+
+
+@pytest.mark.asyncio
+async def test_create_calendar_event_is_registered_as_a_write_tool() -> None:
+    from mcp.server import MCPServer
+
+    registry, _ = create_registry(_writes_config(True), create_discovered_family())
+    server = MCPServer(name="test")
+    registry.register_tools(server)
+
+    tools = {tool.name: tool for tool in await server.list_tools()}
+
+    tool = tools["create_calendar_event"]
+    assert tool.annotations is not None
+    assert tool.annotations.read_only_hint is False
+    assert tool.input_schema["required"] == ["title", "start", "end"]

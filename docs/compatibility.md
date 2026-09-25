@@ -77,5 +77,9 @@ write endpoint was called. Findings are recorded in
 | `set_list_item_checked` true and false | **pass** — 2026-09-14; both directions work; explicit false is honoured |
 | `confirmed` outcome fields (null for misfiled) | **pass** — 2026-09-14; `actual_list_id` and `requested_list_id` null when outcome is `confirmed` |
 | `taskdelete` endpoint exists and works | **pass** — 2026-09-14; deletes items immediately; 14 items tested across two runs |
+| `evtcreate`, one timed single-attendee event | **pass** — 2026-09-25; offset-form local times plus the event's `timeZone` stored the exact requested instant; `color` omitted is accepted; response is the full event object |
+| `create_calendar_event` readback confirmation | **pass** — 2026-09-25; `evtlistinterval` returned the created ID with identical title, instants, zone and calendar, so the outcome was `confirmed` |
+| `evtdelete` of one non-recurring event | **pass** — 2026-09-25; returned `"true"`, event absent on readback (live-check cleanup only; no tool) |
+| `evtcreate` all-members / multiple attendees / all-day | **pending** — only the single-attendee timed form is verified |
 | `taskmark` response shape | **pending** — 2026-09-14; effect verified by readback, response shape still unobserved |
 | Known test week matches the FamilyWall UI | **pending** — P4 |

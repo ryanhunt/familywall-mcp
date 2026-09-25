@@ -322,3 +322,87 @@ def build_interval_fields(
         "a00from": start_iso,
         "a00to": end_iso,
     }
+
+
+def build_create_event_fields(
+    *,
+    title: str,
+    start: datetime,
+    end: datetime,
+    timezone: str,
+    attendee_account_id: str,
+    location: str | None = None,
+    description: str | None = None,
+) -> dict[str, str]:
+    """Build form fields for an evtcreate request: one timed, non-recurring event.
+
+    Evidence: the field set is source-derived from the reference client, whose
+    hard-coded ``Europe/London`` timezone is replaced by the event's own zone.
+    ``isToAll=false`` with a single ``attendee.0.accountId`` is the only attendee
+    encoding observed live (browser probe, 2026-09-16). ``color`` is omitted
+    rather than invented.
+
+    ``start`` and ``end`` must already be in ``timezone``. They are sent as local
+    wall-clock times carrying that zone's own offset, so the same instant results
+    whether the server honours the offset or reads the wall clock in
+    ``timeZone``. The offset form is the one evtlistinterval accepts live.
+
+    Args:
+        title: Event title.
+        start: Aware start datetime in ``timezone``.
+        end: Aware exclusive end datetime in ``timezone``.
+        timezone: IANA timezone name the event belongs to.
+        attendee_account_id: FamilyWall account ID of the single attendee.
+        location: Optional location.
+        description: Optional description.
+
+    Returns:
+        The complete evtcreate form fields.
+
+    Raises:
+        ValueError: If a datetime is naive.
+    """
+    if start.tzinfo is None or end.tzinfo is None:
+        raise ValueError("event start and end must be timezone-aware")
+
+    return {
+        "partnerScope": "Family",
+        "text": title,
+        "startDate": start.isoformat(timespec="seconds"),
+        "endDate": end.isoformat(timespec="seconds"),
+        "timeZone": timezone,
+        "where": location or "",
+        "description": description or "",
+        "isToAll": "false",
+        "attendee.0.accountId": attendee_account_id,
+        "picture": "$empty",
+        "private": "",
+        "recurrency": "NONE",
+        "recurrencyInterval": "1",
+        "byDay": "",
+        "byMonthDay": "",
+        "recurrencyEndDate": "$empty",
+        "reminderList": "$empty",
+    }
+
+
+def parse_created_event_id(payload: object) -> str | None:
+    """Extract the new event's occurrence ID from an evtcreate response.
+
+    Evidence: ``source-only``. The reference client reads ``a00.r.r`` as an event
+    object. A response without a usable ID yields ``None`` rather than an error,
+    because the event may still have been created.
+
+    Args:
+        payload: The unwrapped evtcreate result.
+
+    Returns:
+        The ``eventId`` (or ``metaId``) string, or None if absent.
+    """
+    if not isinstance(payload, dict):
+        return None
+    for key in ("eventId", "metaId"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None

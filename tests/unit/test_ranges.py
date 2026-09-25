@@ -13,6 +13,7 @@ from familywall_mcp.services.ranges import (
     overlaps,
     parse_boundary_input,
     resolve_days,
+    resolve_event_time,
     resolve_week,
 )
 
@@ -402,3 +403,47 @@ class TestAllDayOverlaps:
         )
 
         assert all_day_overlaps(event_start, event_end, window) is False
+
+
+class TestResolveEventTime:
+    """Test resolution of a timed event's start or end into its own zone."""
+
+    def test_local_time_takes_the_zones_standard_offset(self) -> None:
+        """A local time before the Sydney spring-forward carries +10:00."""
+        resolved = resolve_event_time("2026-09-29T10:00", "Australia/Sydney")
+        assert resolved.isoformat() == "2026-09-29T10:00:00+10:00"
+        assert resolved.tzinfo == ZoneInfo("Australia/Sydney")
+
+    def test_local_time_takes_the_zones_daylight_offset(self) -> None:
+        """The same wall-clock time after the spring-forward carries +11:00."""
+        resolved = resolve_event_time("2026-10-06T10:00", "Australia/Sydney")
+        assert resolved.isoformat() == "2026-10-06T10:00:00+11:00"
+        assert resolved.astimezone(UTC) == datetime(2026, 10, 5, 23, 0, tzinfo=UTC)
+
+    def test_offset_input_is_converted_into_the_event_zone(self) -> None:
+        """An explicit UTC instant is kept, and re-expressed in the event zone."""
+        resolved = resolve_event_time("2026-10-05T23:00:00Z", "Australia/Sydney")
+        assert resolved.isoformat() == "2026-10-06T10:00:00+11:00"
+
+    def test_spring_forward_gap_is_rejected(self) -> None:
+        """02:30 on 4 October 2026 does not exist in Sydney."""
+        with pytest.raises(ValueError, match="daylight-saving"):
+            resolve_event_time("2026-10-04T02:30", "Australia/Sydney")
+
+    def test_fall_back_overlap_is_rejected(self) -> None:
+        """02:30 on 5 April 2026 occurs twice in Sydney; neither is guessed."""
+        with pytest.raises(ValueError, match="daylight-saving"):
+            resolve_event_time("2026-04-05T02:30", "Australia/Sydney")
+
+    def test_bare_date_is_rejected(self) -> None:
+        """All-day creation is not supported, so a bare date is refused."""
+        with pytest.raises(ValueError, match="all-day"):
+            resolve_event_time("2026-10-06", "Australia/Sydney")
+
+    def test_unknown_timezone_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="unknown timezone"):
+            resolve_event_time("2026-10-06T10:00", "Mars/Olympus_Mons")
+
+    def test_malformed_value_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="invalid"):
+            resolve_event_time("next tuesday at ten", "Australia/Sydney")

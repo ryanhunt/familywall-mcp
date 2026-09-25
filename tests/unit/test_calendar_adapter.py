@@ -26,7 +26,9 @@ from familywall_mcp.errors import MalformedPayloadError
 from familywall_mcp.familywall.calendar import (
     AllDaySpan,
     TimedSpan,
+    build_create_event_fields,
     build_interval_fields,
+    parse_created_event_id,
     parse_events,
 )
 
@@ -302,3 +304,97 @@ class TestIntervalFields:
         # Sydney is UTC+10 in September (spring)
         assert "+10:00" in result["a00from"]
         assert "+10:00" in result["a00to"]
+
+
+class TestBuildCreateEventFields:
+    """Test the evtcreate form builder."""
+
+    def test_complete_form_for_a_timed_event(self) -> None:
+        """The whole form is asserted, so an added or dropped field fails loudly."""
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo("Australia/Sydney")
+        fields = build_create_event_fields(
+            title="Dentist",
+            start=datetime(2026, 10, 6, 10, 0, tzinfo=tz),
+            end=datetime(2026, 10, 6, 11, 0, tzinfo=tz),
+            timezone="Australia/Sydney",
+            attendee_account_id="acct-synthetic-1",
+            location="Main St",
+            description="Checkup",
+        )
+
+        assert fields == {
+            "partnerScope": "Family",
+            "text": "Dentist",
+            "startDate": "2026-10-06T10:00:00+11:00",
+            "endDate": "2026-10-06T11:00:00+11:00",
+            "timeZone": "Australia/Sydney",
+            "where": "Main St",
+            "description": "Checkup",
+            "isToAll": "false",
+            "attendee.0.accountId": "acct-synthetic-1",
+            "picture": "$empty",
+            "private": "",
+            "recurrency": "NONE",
+            "recurrencyInterval": "1",
+            "byDay": "",
+            "byMonthDay": "",
+            "recurrencyEndDate": "$empty",
+            "reminderList": "$empty",
+        }
+
+    def test_never_hard_codes_london(self) -> None:
+        """The reference client's Europe/London default must not leak through."""
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo("America/New_York")
+        fields = build_create_event_fields(
+            title="Call",
+            start=datetime(2026, 11, 1, 9, 0, tzinfo=tz),
+            end=datetime(2026, 11, 1, 9, 30, tzinfo=tz),
+            timezone="America/New_York",
+            attendee_account_id="acct-synthetic-1",
+        )
+        assert fields["timeZone"] == "America/New_York"
+        assert fields["startDate"] == "2026-11-01T09:00:00-05:00"
+        assert "London" not in "".join(fields.values())
+
+    def test_absent_location_and_description_are_empty(self) -> None:
+        fields = build_create_event_fields(
+            title="Call",
+            start=datetime(2026, 10, 6, 0, 0, tzinfo=UTC),
+            end=datetime(2026, 10, 6, 1, 0, tzinfo=UTC),
+            timezone="UTC",
+            attendee_account_id="acct-synthetic-1",
+        )
+        assert fields["where"] == ""
+        assert fields["description"] == ""
+        assert "color" not in fields
+
+    def test_naive_datetime_is_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            build_create_event_fields(
+                title="Call",
+                start=datetime(2026, 10, 6, 10, 0),
+                end=datetime(2026, 10, 6, 11, 0),
+                timezone="UTC",
+                attendee_account_id="acct-synthetic-1",
+            )
+
+
+class TestParseCreatedEventId:
+    """Test extraction of the created event's ID."""
+
+    def test_event_id_is_preferred(self) -> None:
+        assert parse_created_event_id({"eventId": "event/1", "metaId": "event/2"}) == "event/1"
+
+    def test_meta_id_is_the_fallback(self) -> None:
+        assert parse_created_event_id({"metaId": "event/2"}) == "event/2"
+
+    @pytest.mark.parametrize(
+        "payload",
+        [None, "true", [], {}, {"eventId": ""}, {"eventId": 7}, {"text": "Dentist"}],
+    )
+    def test_unusable_responses_yield_none(self, payload: object) -> None:
+        assert parse_created_event_id(payload) is None
