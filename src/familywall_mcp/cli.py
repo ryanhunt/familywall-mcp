@@ -6,13 +6,15 @@ import argparse
 import asyncio
 import sys
 
+from familywall_mcp import __version__
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="familywall-mcp",
         description="FamilyWall MCP server with family calendar and list management.",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 0.1.0")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command")
     serve = subparsers.add_parser("serve", help="start the MCP server on stdio")
     serve.add_argument("--mode", choices=("stdio", "hosted"), help="optional mode override")

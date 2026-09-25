@@ -55,3 +55,20 @@ def test_safe_error_has_no_raw_body() -> None:
 def test_credentials_are_hidden_from_repr() -> None:
     credentials = FamilyWallCredentials(username="email@example.com", password="synthetic-secret")
     assert "synthetic-secret" not in repr(credentials)
+
+
+def test_version_has_a_single_source() -> None:
+    """The package, its installed metadata and the CLI report one version."""
+    import contextlib
+    import io
+    from importlib.metadata import version
+
+    from familywall_mcp import __version__
+    from familywall_mcp.cli import build_parser
+
+    assert __version__ == version("familywall-mcp")
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer), contextlib.suppress(SystemExit):
+        build_parser().parse_args(["--version"])
+    assert buffer.getvalue().strip() == f"familywall-mcp {__version__}"

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "familywall-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "A safe, typed foundation for a FamilyWall MCP server."
 readme = "README.md"
 license = { file = "LICENSE" }
