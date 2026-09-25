@@ -46,6 +46,10 @@ class ListItem(DomainModel):
     category_names: tuple[str, ...]
     created_at: datetime | None
     completed_at: datetime | None
+    assignee_ids: tuple[str, ...] = ()
+    """Account IDs assigned to this item (from assigneeIds); empty when absent."""
+    to_all: bool | None = None
+    """Whether the item is assigned to everyone (from toAll); None when absent."""
 
 
 class ParsedItems(NamedTuple):
@@ -300,6 +304,18 @@ def parse_list_items(payload: object) -> ParsedItems:
             created_at = _parse_iso8601_utc(entry.get("creationDate"))
             completed_at = _parse_iso8601_utc(entry.get("completedDate"))
 
+            # Assignment fields (optional; a malformed value skips the item,
+            # via the same MalformedPayloadError skip-and-count path).
+            assignee_ids_raw = entry.get("assigneeIds", [])
+            if not isinstance(assignee_ids_raw, list) or not all(
+                isinstance(entry_id, str) for entry_id in assignee_ids_raw
+            ):
+                raise MalformedPayloadError()
+            assignee_ids = tuple(assignee_ids_raw)
+
+            to_all_raw = entry.get("toAll")
+            to_all = _coerce_bool(to_all_raw) if to_all_raw is not None else None
+
             items.append(
                 ListItem(
                     item_id=meta_id,
@@ -311,6 +327,8 @@ def parse_list_items(payload: object) -> ParsedItems:
                     category_names=category_names,
                     created_at=created_at,
                     completed_at=completed_at,
+                    assignee_ids=assignee_ids,
+                    to_all=to_all,
                 )
             )
         except MalformedPayloadError:

@@ -12,10 +12,14 @@ from pydantic import ValidationError
 
 from familywall_mcp.config import AppConfig
 from familywall_mcp.errors import FamilyWallError
+from familywall_mcp.familywall.calendar import CalendarEvent
+from familywall_mcp.familywall.discovery import DiscoveredFamily
+from familywall_mcp.familywall.lists import ListItem
 from familywall_mcp.interfaces import ReceiptRepository
 from familywall_mcp.models import DomainModel
 from familywall_mcp.services.calendar import CalendarService, NewTimedEvent
 from familywall_mcp.services.lists import ListService
+from familywall_mcp.services.members import describe_assignment
 from familywall_mcp.services.principal_context import ContextResolver
 from familywall_mcp.services.ranges import resolve_event_time
 from familywall_mcp.services.session import SessionPool
@@ -55,6 +59,9 @@ class ListItemResponse(DomainModel):
     text: str
     completed: bool
     description: str | None
+    assigned_to: tuple[str, ...]
+    assigned_to_everyone: bool | None
+    unresolved_members: int
 
 
 class GetListItemsResponse(DomainModel):
@@ -63,6 +70,21 @@ class GetListItemsResponse(DomainModel):
     family_name: str
     list_id: str
     items: tuple[ListItemResponse, ...]
+
+
+class FamilyMemberView(DomainModel):
+    """A family member as shown by list_family_members. Never an account ID."""
+
+    display_name: str
+    first_name: str | None
+    is_you: bool
+
+
+class ListFamilyMembersResponse(DomainModel):
+    """Response from list_family_members."""
+
+    family_name: str
+    members: tuple[FamilyMemberView, ...]
 
 
 class GetWeekOverviewResponse(DomainModel):
@@ -186,6 +208,16 @@ class ToolRegistry:
             annotations=ToolAnnotations(read_only_hint=True),
         )(self._get_week_overview)
 
+        server.tool(
+            name="list_family_members",
+            description=(
+                "List the family's members: display name, first name and which one is "
+                "you. Never returns account IDs. Use the exact display or first name shown "
+                "here when naming who a calendar event or list item is assigned to."
+            ),
+            annotations=ToolAnnotations(read_only_hint=True),
+        )(self._list_family_members)
+
         # Write tools
         server.tool(
             name="add_list_item",
@@ -274,15 +306,7 @@ class ToolRegistry:
             service = ListService(transport)
             items = await service.get_list_items(principal, list_id)
 
-            item_responses = tuple(
-                ListItemResponse(
-                    item_id=item.item_id,
-                    text=item.text,
-                    completed=item.completed,
-                    description=item.description,
-                )
-                for item in items
-            )
+            item_responses = tuple(_list_item_view(item, ctx.discovered_family) for item in items)
             return GetListItemsResponse(
                 family_name=ctx.discovered_family.name,
                 list_id=list_id,
@@ -329,15 +353,40 @@ class ToolRegistry:
                     {
                         "day": str(day_agenda.day),
                         "events": [
-                            {
-                                "occurrence_id": evt.occurrence_id,
-                                "title": evt.title,
-                            }
-                            for evt in day_agenda.events
+                            _event_view(evt, ctx.discovered_family) for evt in day_agenda.events
                         ],
                     }
                     for day_agenda in overview.days
                 ),
+            )
+        except FamilyWallError as exc:
+            return ErrorResponse(
+                error_code=exc.info.code,
+                error_message=exc.info.message,
+                error_recovery=exc.info.recovery,
+            )
+
+    async def _list_family_members(self) -> ListFamilyMembersResponse | ErrorResponse:
+        """List family members' names and which one is you.
+
+        Uses only the cached discovery context; makes zero upstream calls.
+
+        Returns:
+            ListFamilyMembersResponse with members in discovery order, or an error.
+        """
+        try:
+            _principal, ctx = await self._context_resolver.resolve()
+            members = tuple(
+                FamilyMemberView(
+                    display_name=member.display_name,
+                    first_name=member.first_name,
+                    is_you=member.is_authenticated_member,
+                )
+                for member in ctx.discovered_family.members
+            )
+            return ListFamilyMembersResponse(
+                family_name=ctx.discovered_family.name,
+                members=members,
             )
         except FamilyWallError as exc:
             return ErrorResponse(
@@ -569,4 +618,30 @@ def _invalid_event(detail: str) -> ErrorResponse:
         error_code="invalid_event",
         error_message="The event details are not valid; no event was created.",
         error_recovery=f"Correct the request and try again ({detail}).",
+    )
+
+
+def _event_view(event: CalendarEvent, family: DiscoveredFamily) -> dict[str, object]:
+    """Build one get_week_overview event entry, with assignment shown as names only."""
+    assignment = describe_assignment(event.attendee_ids, event.to_all, family)
+    return {
+        "occurrence_id": event.occurrence_id,
+        "title": event.title,
+        "assigned_to": list(assignment.names),
+        "assigned_to_everyone": assignment.everyone,
+        "unresolved_members": assignment.unresolved,
+    }
+
+
+def _list_item_view(item: ListItem, family: DiscoveredFamily) -> ListItemResponse:
+    """Build one get_list_items response item, with assignment shown as names only."""
+    assignment = describe_assignment(item.assignee_ids, item.to_all, family)
+    return ListItemResponse(
+        item_id=item.item_id,
+        text=item.text,
+        completed=item.completed,
+        description=item.description,
+        assigned_to=assignment.names,
+        assigned_to_everyone=assignment.everyone,
+        unresolved_members=assignment.unresolved,
     )

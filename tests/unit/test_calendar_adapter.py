@@ -9,6 +9,10 @@ from tests.support.calendar_fixtures import (
     all_day_event,
     bare_event_array,
     birthday_account_event,
+    event_with_assignment_fields,
+    event_with_malformed_attendee_ids,
+    event_with_malformed_editable,
+    event_with_malformed_to_all,
     malformed_event,
     multiday_all_day_event,
     recurring_series_occurrence_1,
@@ -398,3 +402,54 @@ class TestParseCreatedEventId:
     )
     def test_unusable_responses_yield_none(self, payload: object) -> None:
         assert parse_created_event_id(payload) is None
+
+
+class TestAssignmentFields:
+    """T15: attendee_ids, to_all and editable parse; absent fields default; each
+    malformed case skips the event and increments skipped."""
+
+    def test_t15_assignment_fields_parse(self) -> None:
+        """Present attendeeIds, toAll and editable all parse onto the event."""
+        payload = [event_with_assignment_fields()]
+        result = parse_events(payload)
+
+        assert result.skipped == 0
+        event = result.events[0]
+        assert event.attendee_ids == ("acc-alice", "acc-bob")
+        assert event.to_all is False
+        assert event.editable is True
+
+    def test_t15_absent_assignment_fields_give_defaults(self) -> None:
+        """An event with none of the three fields defaults to () / None / None."""
+        payload = [timed_event()]
+        result = parse_events(payload)
+
+        assert result.skipped == 0
+        event = result.events[0]
+        assert event.attendee_ids == ()
+        assert event.to_all is None
+        assert event.editable is None
+
+    def test_t15_malformed_attendee_ids_skips_event(self) -> None:
+        """attendeeIds containing a non-string entry skips the event."""
+        payload = [event_with_malformed_attendee_ids()]
+        result = parse_events(payload)
+
+        assert len(result.events) == 0
+        assert result.skipped == 1
+
+    def test_t15_malformed_to_all_skips_event(self) -> None:
+        """toAll: "maybe" skips the event."""
+        payload = [event_with_malformed_to_all()]
+        result = parse_events(payload)
+
+        assert len(result.events) == 0
+        assert result.skipped == 1
+
+    def test_t15_malformed_editable_skips_event(self) -> None:
+        """editable: "maybe" skips the event."""
+        payload = [event_with_malformed_editable()]
+        result = parse_events(payload)
+
+        assert len(result.events) == 0
+        assert result.skipped == 1

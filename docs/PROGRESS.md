@@ -35,6 +35,7 @@ custom connector over HTTPS; see compatibility table below.
 | P5 | OAuth + static multi-user config | `auth/provider.py`, `OAuthSqliteStore`, `FAMILYWALL_USER_<N>_*` env vars | **done**: `config.py`, `auth/provider.py` implemented and unit-tested; live-verified via ASGI tests with fake credentials |
 | P6 | Containers and HTTPS | `Dockerfile`, `docker-compose.prod.yml`, `Caddyfile.example` | **done**: `uv sync --frozen --no-dev` (the Dockerfile's install step) and the resulting `familywall-mcp serve` process were run directly and answer `/health`; `docker build`/`docker compose` itself was not run (no Docker available in this environment) — verify a real image build before relying on it in production; not yet verified against real Claude/ChatGPT over HTTPS |
 | — | **`create_calendar_event`** (timed, non-recurring, assigned to the signed-in member) | `familywall/calendar.py`, `services/calendar.py`, `services/ranges.py`, `tools/registry.py`; [handoff](handoffs/10-create-calendar-event.md) | **done**: live-verified 2026-09-25 (create, readback `confirmed`, cleanup delete) |
+| 09B | Member resolver, `list_family_members`, assignment read models | `services/members.py`, `familywall/calendar.py`, `familywall/lists.py`, `tools/registry.py`; [handoff](handoffs/09b-member-resolver.md) | **done 2026-09-25**: offline, unit-tested (449 passing); not yet live-verified |
 | P7 | Acceptance and release | — | not started |
 
 ## What 02P settled, and what it changed

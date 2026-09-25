@@ -88,6 +88,15 @@ class CalendarEvent(DomainModel):
     is_series_exception: bool
     """True if recurrencyExceptionOfId is present."""
 
+    attendee_ids: tuple[str, ...] = ()
+    """Account IDs of named attendees (from attendeeIds); empty when absent."""
+
+    to_all: bool | None = None
+    """Whether the event is assigned to everyone (from toAll); None when absent."""
+
+    editable: bool | None = None
+    """Whether the signed-in member can edit this event (from editable); None when absent."""
+
 
 class ParsedEvents(DomainModel):
     """Result of parsing a calendar event list."""
@@ -228,6 +237,21 @@ def _parse_single_event(obj: Any) -> CalendarEvent:
     # Check if this is a series exception
     is_series_exception = "recurrencyExceptionOfId" in obj
 
+    # Assignment fields (optional; a malformed value skips the whole event,
+    # via the same ValueError/MalformedPayloadError skip-and-count path).
+    attendee_ids_raw = obj.get("attendeeIds", [])
+    if not isinstance(attendee_ids_raw, list) or not all(
+        isinstance(entry, str) for entry in attendee_ids_raw
+    ):
+        raise ValueError("attendeeIds must be a list of strings")
+    attendee_ids: tuple[str, ...] = tuple(attendee_ids_raw)
+
+    to_all_raw = obj.get("toAll")
+    to_all: bool | None = coerce_bool(to_all_raw) if to_all_raw is not None else None
+
+    editable_raw = obj.get("editable")
+    editable: bool | None = coerce_bool(editable_raw) if editable_raw is not None else None
+
     # Parse the time span
     try:
         span = _parse_span(raw_start, raw_end, all_day)
@@ -250,6 +274,9 @@ def _parse_single_event(obj: Any) -> CalendarEvent:
         recurrence_rule=recurrence_rule,
         is_recurring=is_recurring,
         is_series_exception=is_series_exception,
+        attendee_ids=attendee_ids,
+        to_all=to_all,
+        editable=editable,
     )
 
 

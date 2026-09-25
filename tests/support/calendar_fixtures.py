@@ -160,6 +160,53 @@ def malformed_event() -> dict:
     }
 
 
+def event_with_assignment_fields() -> dict:
+    """A timed event with attendeeIds, toAll and editable all present."""
+    return {
+        "eventId": "evt-assigned-001",
+        "eventMasterId": "evt-assigned-001",
+        "occurenceIndex": "0",
+        "text": "Family dinner",
+        "startDate": "2026-09-14T18:00:00.000Z",
+        "endDate": "2026-09-14T19:00:00.000Z",
+        "allDay": "false",
+        "timeZone": "Australia/Sydney",
+        "recurrency": "NONE",
+        "eventType": "UNKNOWN",
+        "calendarId": "calendar/family-123",
+        "attendeeIds": ["acc-alice", "acc-bob"],
+        "toAll": "false",
+        "editable": "true",
+    }
+
+
+def event_with_malformed_attendee_ids() -> dict:
+    """An event whose attendeeIds is not a list of strings."""
+    event = event_with_assignment_fields()
+    event["eventId"] = "evt-bad-attendees"
+    event["eventMasterId"] = "evt-bad-attendees"
+    event["attendeeIds"] = ["acc-alice", 42]
+    return event
+
+
+def event_with_malformed_to_all() -> dict:
+    """An event whose toAll is neither "true" nor "false"."""
+    event = event_with_assignment_fields()
+    event["eventId"] = "evt-bad-to-all"
+    event["eventMasterId"] = "evt-bad-to-all"
+    event["toAll"] = "maybe"
+    return event
+
+
+def event_with_malformed_editable() -> dict:
+    """An event whose editable is neither "true" nor "false"."""
+    event = event_with_assignment_fields()
+    event["eventId"] = "evt-bad-editable"
+    event["eventMasterId"] = "evt-bad-editable"
+    event["editable"] = "maybe"
+    return event
+
+
 def bare_event_array() -> list:
     """A bare array of events (the real shape from FamilyWall)."""
     return [
