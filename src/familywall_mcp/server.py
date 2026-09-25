@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from starlette.requests import Request
     from starlette.responses import Response
 
+from familywall_mcp import __version__
 from familywall_mcp.auth.provider import DEFAULT_SCOPE, FamilyWallAuthProvider
 from familywall_mcp.auth.storage import OAuthSqliteStore
 from familywall_mcp.config import AppConfig, RuntimeMode
@@ -123,7 +124,7 @@ async def _run_stdio(config: AppConfig) -> int:
             receipt_repository=receipt_repository,
         )
 
-        server = MCPServer(name="familywall", version="0.1.0")
+        server = MCPServer(name="familywall", version=__version__)
         registry.register_tools(server)
 
         await server.run_stdio_async()
@@ -213,7 +214,7 @@ def build_hosted_app(config: AppConfig) -> HostedApp:
 
     mcp_server = MCPServer(
         name="familywall",
-        version="0.1.0",
+        version=__version__,
         auth_server_provider=auth_provider,
         auth=AuthSettings(
             issuer_url=AnyHttpUrl(config.public_url),

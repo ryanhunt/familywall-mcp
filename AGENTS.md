@@ -11,16 +11,19 @@ same policy.
   project. The local **stdio** server is implemented and live-verified against
   a real FamilyWall account: see [docs/PROGRESS.md](docs/PROGRESS.md) for the
   phase table and current status.
-- The first hosted version is intended for a small group of invited family
-  members. Each person will have their own login, with a self-hosted OAuth
-  identity mapped to that person's FamilyWall credentials. Hosted OAuth,
-  containers/HTTPS and multi-user invites are not implemented yet.
+- The first hosted version is for a small group of invited family members,
+  each with their own login: a self-hosted OAuth identity mapped to that
+  person's FamilyWall credentials. Hosted mode is implemented (P5: OAuth with a
+  static user list configured through `FAMILYWALL_USER_<N>_*` variables; P6:
+  Docker and HTTPS deployment files) but not yet verified end-to-end against a
+  real Claude or ChatGPT connector. Self-service invitations and multi-family
+  support are not implemented.
 - `halaxy-mcp` is a local design reference for a small Python MCP server and
   its operational documentation. Do not copy its domain assumptions or
   sensitive practice-management guidance into this project.
-- Do not describe hosted OAuth, containers/HTTPS, or multi-family/multi-user
-  support as implemented until the corresponding phase lands — check
-  `docs/PROGRESS.md`'s phase table rather than assuming.
+- Do not describe self-service invitations or multi-family support as
+  implemented, or hosted mode as verified against real clients, until
+  `docs/PROGRESS.md`'s phase table says so — check it rather than assuming.
 
 ## Working agreement
 
