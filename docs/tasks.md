@@ -21,8 +21,11 @@ Complete docs/templates/handoff.md with evidence, limitations, and next task.
 Do not mark a live check passed from mock tests. Do not commit/push unless requested.
 ```
 
-For a Luna subagent, the lead adds the precise source revision and files, the allowed
-edit set, and where to return findings. For an independent Claude Code/Codex task,
+For a cheap-worker subagent, the lead adds the precise source revision and files, the
+allowed edit set, and where to return findings. "Cheap worker" means the lowest-cost
+agent tier that can do the job; which models that maps to lives in each machine's
+agent configuration, not in these cards, so the cards do not go stale when models
+change. For an independent Claude Code/Codex task,
 the same prompt works without naming a model. Request a narrow follow-up when a
 check fails instead of reopening the entire phase.
 
@@ -36,19 +39,19 @@ check fails instead of reopening the entire phase.
 | 01A | Package/config/model foundation | 00A, 00C | done: PR #1, docs/handoffs/phase1-foundation.md |
 | 01B | Offline harness and checks | 01A | done: PR #1, docs/handoffs/phase1-foundation.md |
 | 02P | Read-only live probe | 00A, 00B, test account | **next**: lead only, live credentials |
-| 02A | Transport, login and error handling | 01B | Luna |
-| 02B | Discovery, family context and sessions | 02A, 00A, 02P | Luna + lead isolation review |
-| 03A | List API adapters | 02B | Luna |
-| 03B | List selection and mutation service | 03A | Luna + lead receipt review |
-| 03C | Shopping MCP tools | 03B | Luna |
-| 04A | Calendar normalization and ranges | 02B, 00B | Luna |
-| 04B | Week service and calendar MCP tools | 04A | Luna + lead recurrence review |
-| 05A | SQLite migrations and encrypted storage | 01B | Luna + lead storage review |
-| 05B | Invitations and account-link pages | 05A, 02B | Luna |
-| 05C | OAuth provider and HTTP identity | 05A, 00C | Lead-directed Luna + lead auth review |
-| 05D | Multi-user integration and negative tests | 05B, 05C, 03C, 04B | Lead integration; Luna tests |
-| 06A | Containers and HTTPS deployment | 05D | Luna |
-| 06B | Backup, key rotation and operator guide | 06A | Luna + lead recovery review |
+| 02A | Transport, login and error handling | 01B | Cheap worker |
+| 02B | Discovery, family context and sessions | 02A, 00A, 02P | Cheap worker + lead isolation review |
+| 03A | List API adapters | 02B | Cheap worker |
+| 03B | List selection and mutation service | 03A | Cheap worker + lead receipt review |
+| 03C | Shopping MCP tools | 03B | Cheap worker |
+| 04A | Calendar normalization and ranges | 02B, 00B | Cheap worker |
+| 04B | Week service and calendar MCP tools | 04A | Cheap worker + lead recurrence review |
+| 05A | SQLite migrations and encrypted storage | 01B | Cheap worker + lead storage review |
+| 05B | Invitations and account-link pages | 05A, 02B | Cheap worker |
+| 05C | OAuth provider and HTTP identity | 05A, 00C | Lead-directed cheap worker + lead auth review |
+| 05D | Multi-user integration and negative tests | 05B, 05C, 03C, 04B | Lead integration; cheap-worker tests |
+| 06A | Containers and HTTPS deployment | 05D | Cheap worker |
+| 06B | Backup, key rotation and operator guide | 06A | Cheap worker + lead recovery review |
 | 07A | ChatGPT/Claude acceptance and release docs | 06B | Lead + user/client interaction |
 
 Do not concurrently edit shared models, dependency files or app wiring. Safe parallel

@@ -50,11 +50,9 @@ data, generated output, and unsupported claims. Run the repository's defined
 tests, lint, type checks, and other checks when they exist, and attach the
 command and result to the handoff.
 
-At the current foundation stage, no runtime, test, lint, type-check, package
-installation, or server-start command exists. Do not claim those checks ran.
-A plan may propose future commands before the foundation defines them, but mark
-them as proposed or unavailable. Once the Python foundation defines them,
-update this workflow and the contribution guidance with the actual commands.
+The project-defined checks are listed in `AGENTS.md` (working agreement, item
+6); `scripts/check` runs them together. Report each command and its result, and
+never claim a check ran when it did not. Live tests stay opt-in.
 
 ## 5. Hand off clearly
 
