@@ -76,7 +76,13 @@ class OperationReceipt(DomainModel):
     subject: str = Field(min_length=1)
     family_id: str = Field(min_length=1)
     resource_id: str = Field(min_length=1)
-    action: Literal["list.add_item", "list.set_checked", "calendar.create_event", "legacy"]
+    action: Literal[
+        "list.add_item",
+        "list.set_checked",
+        "calendar.create_event",
+        "calendar.set_attendees",
+        "legacy",
+    ]
     operation_id: str = Field(min_length=1, max_length=200)
     payload_hash: str = Field(min_length=1, max_length=128)
     status: Literal["pending", "succeeded", "unknown", "rejected"]

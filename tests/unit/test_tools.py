@@ -18,6 +18,7 @@ from familywall_mcp.tools.registry import (
     ErrorResponse,
     GetListItemsResponse,
     ListFamilyMembersResponse,
+    SetCalendarEventAttendeesResponse,
     ToolRegistry,
 )
 
@@ -102,6 +103,15 @@ class FakeSessionPool:
         elif endpoint == "evtcreate":
             self.created_events.append(fields)
             return {"eventId": f"event/{len(self.created_events)}", "text": fields["text"]}
+        elif endpoint == "evtupdate":
+            index = int(fields["metaId"].rsplit("/", 1)[-1]) - 1
+            form = self.created_events[index]
+            for key in [k for k in form if k.startswith("attendee.")]:
+                del form[key]
+            for key, value in fields.items():
+                if key == "isToAll" or key.startswith("attendee."):
+                    form[key] = value
+            return {"eventId": fields["metaId"], "text": form["text"]}
         elif endpoint == "evtlistinterval":
             return [
                 _stored_event(f"event/{index}", form)
@@ -143,6 +153,7 @@ def _stored_event(event_id: str, form: dict[str, str]) -> dict[str, object]:
         "description": form["description"],
         "attendeeIds": [] if form["isToAll"] == "true" else attendee_ids,
         "toAll": form["isToAll"],
+        "editable": "true",
         "reminderList": [
             {
                 "localId": "reminder-1",
@@ -151,6 +162,27 @@ def _stored_event(event_id: str, form: dict[str, str]) -> dict[str, object]:
                 "reminderValue": form["reminderList.0.reminderValue"],
             }
         ],
+    }
+
+
+def _existing_event_form() -> dict[str, str]:
+    """An evtcreate-shaped form for an already-existing, safe-to-update event,
+    for tests that pre-populate ``pool.created_events`` rather than creating
+    one through the tool. Read back by ``_stored_event`` as "event/1"."""
+    return {
+        "text": "Dentist",
+        "startDate": "2026-10-06T10:00:00+11:00",
+        "endDate": "2026-10-06T11:00:00+11:00",
+        "timeZone": "Australia/Sydney",
+        "where": "",
+        "description": "",
+        "isToAll": "true",
+        "attendee.0.accountId": "acct/1",
+        "attendee.1.accountId": "acct/2",
+        "recurrency": "NONE",
+        "reminderList.0.reminderType": "SNOOZE",
+        "reminderList.0.reminderUnit": "MINUTE",
+        "reminderList.0.reminderValue": "30",
     }
 
 
@@ -908,6 +940,168 @@ async def test_create_calendar_event_is_registered_as_a_write_tool() -> None:
     assert tool.annotations is not None
     assert tool.annotations.read_only_hint is False
     assert tool.input_schema["required"] == ["title", "start", "end"]
+
+
+@pytest.mark.asyncio
+async def test_e2_set_calendar_event_attendees_is_blocked_by_the_write_gate() -> None:
+    """E2: with writes disabled, nothing is looked up or sent."""
+    registry, pool = create_registry(_writes_config(False), create_discovered_family())
+
+    result = await registry._set_calendar_event_attendees("event/1", "2026-10-06")
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error_code == "writes_disabled"
+    assert pool.calls == []
+
+
+@pytest.mark.asyncio
+async def test_e3_invalid_date_gives_zero_calls() -> None:
+    """E3: an unparseable date is rejected before any call."""
+    registry, pool = create_registry(_writes_config(True), create_discovered_family())
+
+    result = await registry._set_calendar_event_attendees("event/1", "not-a-date")
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error_code == "invalid_request"
+    assert pool.calls == []
+
+
+@pytest.mark.asyncio
+async def test_set_calendar_event_attendees_confirms_and_sends_no_account_id() -> None:
+    """Happy path through the tool: lookup, evtupdate, confirm readback."""
+    registry, pool = create_registry(_writes_config(True), create_discovered_family())
+    pool.created_events.append(_existing_event_form())
+
+    result = await registry._set_calendar_event_attendees(
+        "event/1", "2026-10-06", assigned_to=["Test Member"], idempotency_key="op-set-1"
+    )
+
+    assert isinstance(result, SetCalendarEventAttendeesResponse)
+    assert result.outcome == "confirmed"
+    assert result.event_id == "event/1"
+    assert result.assigned_to == ("Test Member",)
+    assert result.assigned_to_everyone is False
+    assert [(call[1], call[3]) for call in pool.calls] == [
+        ("evtlistinterval", "write"),
+        ("evtupdate", "write"),
+        ("evtlistinterval", "write"),
+    ]
+    _, update_fields = pool.calls[1][1], pool.calls[1][2]
+    assert update_fields["isToAll"] == "false"
+    assert update_fields["attendee.0.accountId"] == "acct/1"
+    assert not any(key.startswith("attendee.1") for key in update_fields)
+
+
+@pytest.mark.asyncio
+async def test_e13_set_calendar_event_attendees_response_has_no_account_id() -> None:
+    """E13: the serialised response contains no synthetic account ID."""
+    registry, pool = create_registry(_writes_config(True), create_discovered_family())
+    pool.created_events.append(_existing_event_form())
+
+    result = await registry._set_calendar_event_attendees(
+        "event/1", "2026-10-06", idempotency_key="op-e13"
+    )
+
+    assert isinstance(result, SetCalendarEventAttendeesResponse)
+    assert result.outcome == "confirmed"
+    serialised = result.model_dump_json()
+    assert "acct/1" not in serialised
+    assert "acct/2" not in serialised
+
+
+@pytest.mark.asyncio
+async def test_e11_unknown_member_found_after_one_refresh_for_set_attendees() -> None:
+    """E11: an unknown name refreshes discovery exactly once, then the second
+    lookup uses the refreshed family."""
+    config = _writes_config(True)
+    discovered = create_discovered_family()
+    pool = FakeSessionPoolWithDiscoveryRefresh(_refreshed_family_payload())
+    pool.created_events.append(_existing_event_form())
+    principal = Principal(subject="test-subject")
+    family_context = FamilyContext(
+        account_id="acct/1", family_id="family/1", calendar_id="calendar/1"
+    )
+    context = PrincipalContext(
+        family_context=family_context,
+        discovered_family=discovered,
+        authenticated_member_timezone="Australia/Sydney",
+        calendar_service=FakeCalendarService(),  # type: ignore[arg-type]
+    )
+    registry = ToolRegistry(
+        config=config,
+        session_pool=pool,  # type: ignore[arg-type]
+        context_resolver=FixedContextResolver(principal, context, pool),  # type: ignore[arg-type]
+        receipt_repository=InMemoryReceiptRepository(),
+    )
+
+    result = await registry._set_calendar_event_attendees(
+        "event/1", "2026-10-06", assigned_to=["Jordan"], idempotency_key="op-jordan-set"
+    )
+
+    assert isinstance(result, SetCalendarEventAttendeesResponse)
+    assert result.outcome == "confirmed"
+    assert result.assigned_to == ("Jordan Lee",)
+    assert result.assigned_to_everyone is False
+    assert pool.discovery_calls == 1
+
+    endpoint_calls = [call[1] for call in pool.calls]
+    assert endpoint_calls.count("accgetallfamily") == 1
+    evtupdate_fields = next(
+        fields for _, endpoint, fields, _ in pool.calls if endpoint == "evtupdate"
+    )
+    assert evtupdate_fields["isToAll"] == "false"
+    assert evtupdate_fields["attendee.0.accountId"] == "acct/3"
+
+
+@pytest.mark.asyncio
+async def test_e11_ambiguous_name_never_refreshes_for_set_attendees() -> None:
+    """E11: an ambiguous name never refreshes and makes zero upstream calls."""
+    config = _writes_config(True)
+    discovered = create_family_with_ambiguous_members()
+    pool = FakeSessionPoolWithDiscoveryRefresh(_refreshed_family_payload())
+    pool.created_events.append(_existing_event_form())
+    principal = Principal(subject="test-subject")
+    family_context = FamilyContext(
+        account_id="acct/1", family_id="family/1", calendar_id="calendar/1"
+    )
+    context = PrincipalContext(
+        family_context=family_context,
+        discovered_family=discovered,
+        authenticated_member_timezone="Australia/Sydney",
+        calendar_service=FakeCalendarService(),  # type: ignore[arg-type]
+    )
+    registry = ToolRegistry(
+        config=config,
+        session_pool=pool,  # type: ignore[arg-type]
+        context_resolver=FixedContextResolver(principal, context, pool),  # type: ignore[arg-type]
+        receipt_repository=InMemoryReceiptRepository(),
+    )
+
+    result = await registry._set_calendar_event_attendees(
+        "event/1", "2026-10-06", assigned_to=["Jordan"]
+    )
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error_code == "ambiguous_member"
+    assert pool.calls == []
+    assert pool.discovery_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_set_calendar_event_attendees_is_registered_as_a_write_tool() -> None:
+    from mcp.server import MCPServer
+
+    registry, _ = create_registry(_writes_config(True), create_discovered_family())
+    server = MCPServer(name="test")
+    registry.register_tools(server)
+
+    tools = {tool.name: tool for tool in await server.list_tools()}
+
+    tool = tools["set_calendar_event_attendees"]
+    assert tool.annotations is not None
+    assert tool.annotations.read_only_hint is False
+    assert tool.annotations.destructive_hint is False
+    assert tool.input_schema["required"] == ["event_id", "date"]
 
 
 @pytest.mark.asyncio

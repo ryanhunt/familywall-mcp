@@ -33,12 +33,13 @@ from familywall_mcp.familywall.calendar import (
     TimedSpan,
     build_create_event_fields,
     build_interval_fields,
+    build_update_attendees_fields,
     parse_created_event_id,
     parse_events,
 )
 from familywall_mcp.models import DomainModel, FamilyContext, OperationReceipt, Principal
 from familywall_mcp.services.members import ResolvedAssignment
-from familywall_mcp.services.ranges import resolve_days, resolve_week
+from familywall_mcp.services.ranges import LocalRange, resolve_days, resolve_week
 
 if TYPE_CHECKING:
     from familywall_mcp.interfaces import ReceiptRepository
@@ -60,6 +61,32 @@ _INDETERMINATE_ERRORS = (
     InvalidEnvelopeError,
     MalformedPayloadError,
 )
+
+_EVENT_NOT_FOUND = ErrorInfo(
+    code="event_not_found",
+    message="No event with that ID was found on the given local day.",
+    recovery="Check the event ID and date, e.g. from get_week_overview.",
+)
+
+_UNSUPPORTED_EVENT = ErrorInfo(
+    code="unsupported_event",
+    message="This event's attendees cannot be changed by this tool.",
+    recovery=(
+        "Only an ordinary, one-off, timed, editable event on the family calendar is supported."
+    ),
+)
+
+
+class EventNotFoundError(FamilyWallError):
+    """No event with the given ID was found in the looked-up local day."""
+
+    default = _EVENT_NOT_FOUND
+
+
+class UnsupportedEventError(FamilyWallError):
+    """The event fails one of decision 4's safety checks; refused before any write."""
+
+    default = _UNSUPPORTED_EVENT
 
 
 class CalendarTransport(Protocol):
@@ -157,6 +184,15 @@ class CreateEventResult(DomainModel):
     mismatched_fields: tuple[str, ...] = ()
     actual_start: str | None = None  # local ISO datetime, or a date for an all-day event
     actual_end: str | None = None
+
+
+class SetAttendeesResult(DomainModel):
+    """Result of changing an existing calendar event's attendees."""
+
+    outcome: EventWriteOutcome
+    event_id: str
+    # Populated if and only if outcome is mismatched:
+    mismatched_fields: tuple[str, ...] = ()
 
 
 class CalendarService:
@@ -455,6 +491,182 @@ class CalendarService:
             actual_end=actual_end,
         )
 
+    async def set_event_attendees(
+        self,
+        principal: Principal,
+        event_id: str,
+        local_day: date,
+        timezone: str,
+        assignment: ResolvedAssignment,
+        operation_id: str,
+        receipt_repository: ReceiptRepository,
+        family_context: FamilyContext,
+    ) -> SetAttendeesResult:
+        """Change only the attendees of one existing, safe-to-update event.
+
+        ``assignment`` is already resolved (names to account IDs) by the
+        caller, the same way ``create_event`` is; no member name ever reaches
+        this method or the wire, only account IDs.
+
+        The idempotency-key replay check runs first, from a payload hash of
+        the complete wire form alone (independent of the lookup), so a
+        replayed key makes zero upstream calls even for a request that would
+        otherwise fail the lookup or a safety check. For a fresh key: the
+        event is fetched from the member's local ``local_day`` window
+        (``resolve_days(local_day, 1, timezone)``); not found raises
+        ``EventNotFoundError`` with zero writes. The found event is then
+        checked against decision 4's safety gates (family calendar, exactly
+        ``editable=True``, non-recurring, not a series exception, an
+        ordinary ``"UNKNOWN"`` event, and timed rather than all-day); any
+        failure raises ``UnsupportedEventError`` with zero writes and no
+        receipt. Only then is a ``"pending"`` receipt recorded and
+        ``evtupdate`` sent, once, never retried.
+
+        The outcome is confirmed only when a re-read of the same day window
+        finds the event with the requested attendees **and** every other
+        comparable field (title, span, timezone, location, description,
+        recurrence flags, calendar and reminders) unchanged from the event
+        this method first read.
+
+        Receipts carry ``resource_id=event_id`` and
+        ``action="calendar.set_attendees"``; the payload hash is tagged with
+        the endpoint so a key reused across tools conflicts rather than
+        replays. A definite refusal (``UpstreamRejectedError`` or
+        ``AuthenticationError``) is recorded as ``status="rejected"`` with the
+        error's code, message and recovery, exactly as ``create_event`` does,
+        so a replay raises the same error rather than reporting ``unknown``.
+
+        Args:
+            principal: The authenticated subject.
+            event_id: The occurrence ID to update.
+            local_day: The event's local calendar day, in ``timezone``.
+            timezone: IANA timezone name to look the event up in (the
+                authenticated member's own timezone).
+            assignment: The resolved attendees (everyone, or named members).
+            operation_id: Operation ID supplied by the caller; must not be empty.
+            receipt_repository: Repository for receipt tracking and idempotency.
+            family_context: The verified family context of ``principal``.
+
+        Returns:
+            SetAttendeesResult with the outcome.
+
+        Raises:
+            ValueError: If operation_id is empty.
+            FamilyWallError: If operation_id was used for a different request
+                (``operation_id_conflict``), if no event with ``event_id`` was
+                found in the local day (``event_not_found``), or if the found
+                event fails a safety gate (``unsupported_event``).
+            UpstreamRejectedError: If FamilyWall refused the update.
+            AuthenticationError: If the session was not accepted for the update.
+        """
+        if not operation_id or not operation_id.strip():
+            raise ValueError("operation_id must not be empty")
+
+        fields = build_update_attendees_fields(
+            event_id=event_id,
+            calendar_id=family_context.calendar_id,
+            to_all=assignment.to_all,
+            attendee_account_ids=assignment.account_ids,
+        )
+        payload_hash = _hash_payload("evtupdate", family_context.calendar_id, fields)
+
+        existing = await receipt_repository.get(principal, operation_id)
+        if existing is not None:
+            return _replay_set_attendees(existing, payload_hash, event_id)
+
+        async def record(
+            status: Literal["pending", "succeeded", "unknown", "rejected"],
+            result: SetAttendeesResult | None = None,
+            upstream_id: str | None = None,
+        ) -> None:
+            await receipt_repository.put(
+                OperationReceipt(
+                    subject=principal.subject,
+                    family_id=family_context.family_id,
+                    resource_id=event_id,
+                    action="calendar.set_attendees",
+                    operation_id=operation_id,
+                    payload_hash=payload_hash,
+                    status=status,
+                    upstream_id=(
+                        upstream_id
+                        if upstream_id is not None
+                        else (result.model_dump_json() if result else None)
+                    ),
+                    expires_at=datetime.now(UTC) + RECEIPT_TTL,
+                )
+            )
+
+        day_range = resolve_days(local_day, 1, timezone)
+        lookup_fields = build_interval_fields(
+            family_context.calendar_id, day_range.start, day_range.end
+        )
+        payload = await self.transport.call("evtlistinterval", lookup_fields)
+        parsed = parse_events(payload)
+        before = next((e for e in parsed.events if e.occurrence_id == event_id), None)
+        if before is None:
+            raise EventNotFoundError()
+
+        if _is_unsafe_to_update(before, family_context.calendar_id):
+            raise UnsupportedEventError()
+
+        await record("pending")
+
+        try:
+            await self.transport.call("evtupdate", fields)
+        except (UpstreamRejectedError, AuthenticationError) as exc:
+            # A definite refusal: nothing changed. Record it as rejected so a
+            # replay of this key raises the same refusal instead of resending.
+            info = exc.info
+            await record(
+                "rejected",
+                upstream_id=json.dumps(
+                    {"code": info.code, "message": info.message, "recovery": info.recovery}
+                ),
+            )
+            raise
+        except _INDETERMINATE_ERRORS:
+            await record("unknown")
+            return SetAttendeesResult(outcome=EventWriteOutcome.UNKNOWN, event_id=event_id)
+
+        acknowledged = SetAttendeesResult(outcome=EventWriteOutcome.ACKNOWLEDGED, event_id=event_id)
+        # Record the acknowledgement before the readback, so a crash replays as
+        # acknowledged rather than unknown.
+        await record("succeeded", acknowledged)
+
+        result = await self._confirm_attendees(
+            event_id, before, assignment, family_context, day_range
+        )
+        await record("succeeded", result)
+        return result
+
+    async def _confirm_attendees(
+        self,
+        event_id: str,
+        before: CalendarEvent,
+        assignment: ResolvedAssignment,
+        family_context: FamilyContext,
+        day_range: LocalRange,
+    ) -> SetAttendeesResult:
+        """Re-read the same local day window and compare it with ``before``."""
+        fields = build_interval_fields(family_context.calendar_id, day_range.start, day_range.end)
+        try:
+            payload = await self.transport.call("evtlistinterval", fields)
+            parsed = parse_events(payload)
+        except (*_INDETERMINATE_ERRORS, UpstreamRejectedError, AuthenticationError):
+            return SetAttendeesResult(outcome=EventWriteOutcome.ACKNOWLEDGED, event_id=event_id)
+
+        after = next((e for e in parsed.events if e.occurrence_id == event_id), None)
+        if after is None:
+            return SetAttendeesResult(outcome=EventWriteOutcome.ACKNOWLEDGED, event_id=event_id)
+
+        mismatched = _readback_attendee_mismatches(before, after, assignment)
+        if not mismatched:
+            return SetAttendeesResult(outcome=EventWriteOutcome.CONFIRMED, event_id=event_id)
+        return SetAttendeesResult(
+            outcome=EventWriteOutcome.MISMATCHED, event_id=event_id, mismatched_fields=mismatched
+        )
+
 
 def _hash_payload(endpoint: str, calendar_id: str, fields: Mapping[str, str]) -> str:
     """Hash a write's full intent for operation-ID conflict detection."""
@@ -494,6 +706,104 @@ def _replay_create(existing: OperationReceipt, payload_hash: str) -> CreateEvent
             return CreateEventResult(outcome=EventWriteOutcome.ACKNOWLEDGED)
     # pending (a crash mid-write) and unknown both resolve to unknown.
     return CreateEventResult(outcome=EventWriteOutcome.UNKNOWN)
+
+
+def _replay_set_attendees(
+    existing: OperationReceipt, payload_hash: str, event_id: str
+) -> SetAttendeesResult:
+    """Resolve a repeated operation ID from its stored receipt, with no upstream call."""
+    # A receipt written by a different tool (or reused across tools) never replays
+    # as this one; a migrated "legacy" receipt is accepted either way.
+    if existing.action not in ("calendar.set_attendees", "legacy"):
+        raise FamilyWallError(
+            ErrorInfo(
+                code="operation_id_conflict",
+                message="An operation with this ID already exists with different content.",
+                recovery="Use a different operation ID for this request.",
+            )
+        )
+    if existing.payload_hash != payload_hash:
+        raise FamilyWallError(
+            ErrorInfo(
+                code="operation_id_conflict",
+                message="An operation with this ID already exists with different content.",
+                recovery="Use a different operation ID for this request.",
+            )
+        )
+    if existing.status == "rejected":
+        raise _rebuild_rejection(existing.upstream_id)
+    if existing.status == "succeeded" and existing.upstream_id:
+        try:
+            return SetAttendeesResult.model_validate_json(existing.upstream_id)
+        except ValidationError:
+            return SetAttendeesResult(outcome=EventWriteOutcome.ACKNOWLEDGED, event_id=event_id)
+    # pending (a crash mid-write) and unknown both resolve to unknown.
+    return SetAttendeesResult(outcome=EventWriteOutcome.UNKNOWN, event_id=event_id)
+
+
+def _is_unsafe_to_update(event: CalendarEvent, calendar_id: str) -> bool:
+    """True if ``event`` fails any of decision 4's safety gates.
+
+    Checked after the lookup and before any receipt or write: a different
+    calendar, ``editable`` other than exactly ``True`` (so ``None`` is
+    refused too), recurring, a series exception, not an ordinary
+    ``"UNKNOWN"`` event, or all-day.
+    """
+    return (
+        event.calendar_id != calendar_id
+        or event.editable is not True
+        or event.is_recurring
+        or event.is_series_exception
+        or event.event_type != "UNKNOWN"
+        or isinstance(event.span, AllDaySpan)
+    )
+
+
+def _readback_attendee_mismatches(
+    before: CalendarEvent,
+    after: CalendarEvent,
+    assignment: ResolvedAssignment,
+) -> tuple[str, ...]:
+    """Name every field where the read-back event differs from ``before``.
+
+    Every field is compared against the event first read (``before``),
+    except attendees, which are compared against the request
+    (``assignment``) using the same rule ``create_event`` uses.
+    """
+    mismatched: list[str] = []
+    if after.title != before.title:
+        mismatched.append("title")
+    if isinstance(before.span, TimedSpan) and isinstance(after.span, TimedSpan):
+        if after.span.start != before.span.start:
+            mismatched.append("start")
+        if after.span.end != before.span.end:
+            mismatched.append("end")
+    elif type(after.span) is not type(before.span):
+        mismatched.append("all_day")
+    if after.event_timezone != before.event_timezone:
+        mismatched.append("timezone")
+    if (after.location or "") != (before.location or ""):
+        mismatched.append("location")
+    if (after.description or "") != (before.description or ""):
+        mismatched.append("description")
+    if (after.is_recurring, after.is_series_exception) != (
+        before.is_recurring,
+        before.is_series_exception,
+    ):
+        mismatched.append("recurrence")
+    if after.calendar_id != before.calendar_id:
+        mismatched.append("calendar")
+    if assignment.to_all:
+        attendees_ok = after.to_all is True
+    else:
+        attendees_ok = after.to_all is False and set(after.attendee_ids) == set(
+            assignment.account_ids
+        )
+    if not attendees_ok:
+        mismatched.append("attendees")
+    if after.reminders != before.reminders:
+        mismatched.append("reminder")
+    return tuple(mismatched)
 
 
 def _rebuild_rejection(upstream_id: str | None) -> FamilyWallError:

@@ -14,7 +14,7 @@ gate, file boundary, acceptance criteria and who should implement it under the
 | 3. Read models | **Done** — slice B, offline, 2026-09-25. Live reads already show `attendeeIds`, `attendees`, `toAll` and `editable` on events, and `assignee`, `assigneeIds` and `toAll` on tasks | [handoff](../handoffs/09b-member-resolver.md), contracts |
 | 4. List assignment | Not started | — |
 | 5. Generalized receipts | **Done** (slice D, offline). `OperationReceipt.list_id` is now `resource_id` with an `action` field and a `rejected` status; legacy SQLite databases migrate in place | [handoff 09d](../handoffs/09d-receipts-migration.md) |
-| 6. Calendar attendees | **Create with `assigned_to`, default everyone, done** (`create_calendar_event`, slice C, offline 2026-09-25). `set_calendar_event_attendees` (editing an existing event) is not started | PR #9; [handoff 09c](../handoffs/09c-calendar-attendees.md) |
+| 6. Calendar attendees | **Done.** Create with `assigned_to`, default everyone (`create_calendar_event`, slice C, offline 2026-09-25); `set_calendar_event_attendees` (editing an existing event's attendees only, slice E, offline 2026-09-25) | PR #9; [handoff 09c](../handoffs/09c-calendar-attendees.md), [handoff 09e](../handoffs/09e-set-event-attendees.md) |
 
 ## Decisions (settled by the account owner, 2026-09-25)
 
@@ -69,7 +69,7 @@ gate, file boundary, acceptance criteria and who should implement it under the
 | B | Member resolver, `list_family_members`, assignment read models | — | **done 2026-09-25** |
 | D | Generalized receipts and migration | — | **done 2026-09-25** |
 | C | Attendees on `create_calendar_event`, default everyone | A1, B | **done 2026-09-25**, offline |
-| E | `set_calendar_event_attendees` | A1, B, D | after those |
+| E | `set_calendar_event_attendees` | A1, B, D | **done 2026-09-25**, offline |
 | F | List assignment, single-call `taskcreate2` add, `set_list_item_assignees` | A2, B, D | after those |
 | G | Live acceptance and docs | each slice | per slice |
 
@@ -321,6 +321,11 @@ Files: `models.py`, `interfaces.py`, `storage/memory.py`, `storage/sqlite.py`,
 
 ## Slice E — `set_calendar_event_attendees`
 
+**Status: done 2026-09-25, offline.** Implemented per
+[brief 09e](09e-set-event-attendees.md); see
+[handoff 09e](../handoffs/09e-set-event-attendees.md) for the full evidence
+(tests E1–E13).
+
 **Implementer:** lead-directed cheap agent after A1, B and D. **Lead reviews the
 safety gates.**
 
@@ -345,10 +350,14 @@ Files: `familywall/calendar.py` (update builder), `services/calendar.py`,
 - One write, no retry. `resource_id` is the event ID.
 
 **Acceptance:**
-- [ ] One zero-call refusal test for each unsafe target.
-- [ ] If any non-attendee field changed on readback, the outcome is
+- [x] One refusal test for each unsafe target, after only the lookup read and
+  with zero writes and no receipt (corrected from "zero-call" here to match
+  brief 09e's binding decision 4/E4: the refusal is necessarily discovered
+  from the lookup's own read, so it is zero-*write*, not zero-*call* — the
+  same kind of in-place correction slice C's own plan text needed).
+- [x] If any non-attendee field changed on readback, the outcome is
   `mismatched`, never `confirmed`.
-- [ ] Tests cover replay, conflict and cross-subject isolation.
+- [x] Tests cover replay, conflict and cross-subject isolation.
 
 ## Slice F — List assignment
 

@@ -498,6 +498,62 @@ def build_create_event_fields(
     return fields
 
 
+def build_update_attendees_fields(
+    *,
+    event_id: str,
+    calendar_id: str,
+    to_all: bool,
+    attendee_account_ids: Sequence[str],
+) -> dict[str, str]:
+    """Build form fields for an evtupdate request that changes only attendees.
+
+    Evidence: probe A1 (2026-09-25, ``docs/contracts/calendar.md#mutations``).
+    A request carrying only ``partnerScope``, ``option=All``, ``calendarId``,
+    ``metaId``, ``isToAll`` and ``attendee.N.accountId`` changed the attendees
+    and left every other field (title, instants, zone, reminder, privacy,
+    recurrence) unchanged; the attendee set is replaced, not merged. Nothing
+    else is sent, and no other field is rebuilt from the event being updated.
+
+    Everyone is ``isToAll=true`` **plus** an ``attendee.N.accountId`` for every
+    member, matching ``build_create_event_fields``'s verified everyone
+    encoding; named members are ``isToAll=false`` with ``attendee.0..N-1``, in
+    the given order.
+
+    This function only ever receives resolved account IDs, never member
+    names: name resolution happens one layer up, before any wire call.
+
+    Args:
+        event_id: The occurrence ID to update, sent as ``metaId``.
+        calendar_id: The event's calendar ID (e.g. ``"calendar/{family_id}"``).
+        to_all: Whether every family member is meant. When ``True``,
+            ``attendee_account_ids`` must still list every member (the
+            everyone encoding sends both).
+        attendee_account_ids: FamilyWall account IDs to send, in order. Never
+            empty, even for ``to_all=True``.
+
+    Returns:
+        The complete evtupdate form fields: ``partnerScope``, ``option``,
+        ``calendarId``, ``metaId``, ``isToAll`` and one
+        ``attendee.N.accountId`` per ID, in that order.
+
+    Raises:
+        ValueError: If ``attendee_account_ids`` is empty.
+    """
+    if not attendee_account_ids:
+        raise ValueError("attendee_account_ids must not be empty")
+
+    fields: dict[str, str] = {
+        "partnerScope": "Family",
+        "option": "All",
+        "calendarId": calendar_id,
+        "metaId": event_id,
+        "isToAll": "true" if to_all else "false",
+    }
+    for index, account_id in enumerate(attendee_account_ids):
+        fields[f"attendee.{index}.accountId"] = account_id
+    return fields
+
+
 def parse_created_event_id(payload: object) -> str | None:
     """Extract the new event's occurrence ID from an evtcreate response.
 
