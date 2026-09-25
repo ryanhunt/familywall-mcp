@@ -230,7 +230,7 @@ Implement structured output using the pinned SDK; do not hand-roll JSON-RPC.
 | `get_list` | list ID, optional family ID/cursor/limit | Normalized items with IDs and checked state |
 | `add_list_item` | title, optional family/list IDs, operation ID | Created item ID and list; unknown outcome explicitly represented |
 | `set_list_item_checked` | list/item IDs, boolean checked, operation ID | Confirmed target state, no toggle |
-| `create_calendar_event` | title, start/end (local or with offset), optional timezone/location/description, operation ID | One timed, non-recurring event assigned to the authenticated member; confirmed, mismatched, acknowledged or unknown from an exact-ID readback |
+| `create_calendar_event` | title, start/end (local or with offset), optional timezone/location/description, optional `assigned_to` member names (blank means everyone), operation ID | One timed, non-recurring event with the web app's default 30-minute reminder, assigned to the named members or everyone; confirmed, mismatched, acknowledged or unknown from an exact-ID readback |
 | `get_calendar_events` | explicit start/end, optional family ID/timezone | Sorted overlapping occurrences; range, timezone, completeness and warnings |
 | `get_week_overview` | optional date within week/family/timezone | Calendar-only week overview using the same range service |
 

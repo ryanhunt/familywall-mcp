@@ -110,7 +110,7 @@ async def _run_stdio(config: AppConfig) -> int:
         session_pool = SessionPool(client_factory=factory, clock=SimpleClock())
 
         context = await build_principal_context(principal, session_pool)
-        context_resolver = FixedContextResolver(principal, context)
+        context_resolver = FixedContextResolver(principal, context, session_pool)
 
         receipt_repository = SqliteReceiptRepository(config.database_path, clock=SimpleClock())
         await receipt_repository.initialise()

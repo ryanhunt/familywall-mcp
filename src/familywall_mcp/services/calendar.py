@@ -29,6 +29,7 @@ from familywall_mcp.errors import (
 from familywall_mcp.familywall.calendar import (
     AllDaySpan,
     CalendarEvent,
+    EventReminder,
     TimedSpan,
     build_create_event_fields,
     build_interval_fields,
@@ -36,6 +37,7 @@ from familywall_mcp.familywall.calendar import (
     parse_events,
 )
 from familywall_mcp.models import DomainModel, FamilyContext, OperationReceipt, Principal
+from familywall_mcp.services.members import ResolvedAssignment
 from familywall_mcp.services.ranges import resolve_days, resolve_week
 
 if TYPE_CHECKING:
@@ -48,6 +50,9 @@ READBACK_MARGIN = timedelta(days=1)
 """Readback window padding, wide enough to find an event shifted by a zone error."""
 
 RECEIPT_TTL = timedelta(hours=24)
+
+DEFAULT_REMINDER = (EventReminder(type="SNOOZE", unit="MINUTE", value="30"),)
+"""The web app's own default reminder for a timed event (probe A1, 2026-09-25)."""
 
 _INDETERMINATE_ERRORS = (
     TransportError,
@@ -284,31 +289,37 @@ class CalendarService:
         self,
         principal: Principal,
         request: NewTimedEvent,
+        assignment: ResolvedAssignment,
         operation_id: str,
         receipt_repository: ReceiptRepository,
         family_context: FamilyContext,
     ) -> CreateEventResult:
-        """Create one timed, non-recurring event, assigned to the authenticated member.
+        """Create one timed, non-recurring event, assigned per ``assignment``.
 
-        The single-attendee encoding is the only one observed live, so the event
-        is always assigned to ``family_context.account_id``; no caller-supplied
-        account ID ever reaches the wire.
+        ``assignment`` is already resolved (names to account IDs) by the
+        caller; no member name ever reaches this method or the wire, only
+        account IDs. Everyone is sent as ``to_all=True`` plus every member's
+        account ID (the web app's own encoding, probe A1 2026-09-25); named
+        members are sent as ``to_all=False`` with just those IDs.
 
         evtcreate is sent at most once and never retried. The outcome is confirmed
         only when a readback finds the created event ID with exactly the requested
-        title, instants, zone, location and description in the family calendar.
+        title, instants, zone, location, description, attendees and reminder in
+        the family calendar.
 
         Receipts carry ``resource_id=family_context.calendar_id`` and
         ``action="calendar.create_event"``; the payload hash is tagged with the
-        endpoint so a key reused across tools conflicts rather than replays. A
-        definite refusal (``UpstreamRejectedError`` or ``AuthenticationError``)
-        is recorded as ``status="rejected"`` with the error's code, message and
-        recovery so a replay raises the same error rather than reporting
-        ``unknown``.
+        endpoint so a key reused across tools conflicts rather than replays. The
+        hash is built from the complete wire form, so it naturally covers the
+        attendee and reminder fields too. A definite refusal
+        (``UpstreamRejectedError`` or ``AuthenticationError``) is recorded as
+        ``status="rejected"`` with the error's code, message and recovery so a
+        replay raises the same error rather than reporting ``unknown``.
 
         Args:
             principal: The authenticated subject.
             request: The validated event.
+            assignment: The resolved attendees (everyone, or named members).
             operation_id: Operation ID supplied by the caller; must not be empty.
             receipt_repository: Repository for receipt tracking and idempotency.
             family_context: The verified family context of ``principal``.
@@ -333,7 +344,8 @@ class CalendarService:
             start=start,
             end=end,
             timezone=request.timezone,
-            attendee_account_id=family_context.account_id,
+            to_all=assignment.to_all,
+            attendee_account_ids=assignment.account_ids,
             location=request.location,
             description=request.description,
         )
@@ -393,7 +405,9 @@ class CalendarService:
         if event_id is None:
             return acknowledged
 
-        result = await self._confirm_created(event_id, request, start, end, family_context)
+        result = await self._confirm_created(
+            event_id, request, assignment, start, end, family_context
+        )
         await record("succeeded", result)
         return result
 
@@ -401,6 +415,7 @@ class CalendarService:
         self,
         event_id: str,
         request: NewTimedEvent,
+        assignment: ResolvedAssignment,
         start: datetime,
         end: datetime,
         family_context: FamilyContext,
@@ -419,7 +434,9 @@ class CalendarService:
         if found is None:
             return CreateEventResult(outcome=EventWriteOutcome.ACKNOWLEDGED, event_id=event_id)
 
-        mismatched = _readback_mismatches(found, request, start, end, family_context.calendar_id)
+        mismatched = _readback_mismatches(
+            found, request, assignment, start, end, family_context.calendar_id
+        )
         if not mismatched:
             return CreateEventResult(outcome=EventWriteOutcome.CONFIRMED, event_id=event_id)
 
@@ -499,6 +516,7 @@ def _rebuild_rejection(upstream_id: str | None) -> FamilyWallError:
 def _readback_mismatches(
     event: CalendarEvent,
     request: NewTimedEvent,
+    assignment: ResolvedAssignment,
     start: datetime,
     end: datetime,
     calendar_id: str,
@@ -524,6 +542,16 @@ def _readback_mismatches(
         mismatched.append("recurrence")
     if event.calendar_id != calendar_id:
         mismatched.append("calendar")
+    if assignment.to_all:
+        attendees_ok = event.to_all is True
+    else:
+        attendees_ok = event.to_all is False and set(event.attendee_ids) == set(
+            assignment.account_ids
+        )
+    if not attendees_ok:
+        mismatched.append("attendees")
+    if event.reminders != DEFAULT_REMINDER:
+        mismatched.append("reminder")
     return tuple(mismatched)
 
 

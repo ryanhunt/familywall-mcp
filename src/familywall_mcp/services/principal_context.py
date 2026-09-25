@@ -13,7 +13,10 @@ user's tool call.
 ``ContextResolver`` is the seam between those two cases: ``FixedContextResolver``
 returns the one context built at startup (stdio); ``HostedContextResolver``
 reads ``get_access_token()`` per call and lazily builds/caches a
-``PrincipalContext`` per subject (hosted).
+``PrincipalContext`` per subject (hosted). Both also implement ``refresh()``,
+which rebuilds the context from one more discovery call: a tool calls it, at
+most once, when a member name it resolved against the cached family list
+turns out to be unknown, in case that list is simply stale.
 """
 
 from __future__ import annotations
@@ -84,6 +87,14 @@ async def build_principal_context(
 class ContextResolver(Protocol):
     async def resolve(self) -> tuple[Principal, PrincipalContext]: ...
 
+    async def refresh(self) -> tuple[Principal, PrincipalContext]:
+        """Rebuild the current principal's context from a fresh discovery call.
+
+        Used exactly once, when a tool's member-name resolution fails with
+        ``unknown_member``: the cached family list may simply be stale.
+        """
+        ...
+
 
 class FixedContextResolver:
     """Always returns the one (principal, context) pair built at startup.
@@ -92,11 +103,29 @@ class FixedContextResolver:
     whole process lifetime.
     """
 
-    def __init__(self, principal: Principal, context: PrincipalContext) -> None:
+    def __init__(
+        self,
+        principal: Principal,
+        context: PrincipalContext,
+        session_pool: SessionPool | None = None,
+    ) -> None:
         self._principal = principal
         self._context = context
+        self._session_pool = session_pool
 
     async def resolve(self) -> tuple[Principal, PrincipalContext]:
+        return self._principal, self._context
+
+    async def refresh(self) -> tuple[Principal, PrincipalContext]:
+        """Rebuild the context from one more discovery call, if possible.
+
+        Without a ``session_pool`` there is nothing to refresh against (e.g.
+        a fixed context built for a test), so this returns the current pair
+        unchanged.
+        """
+        if self._session_pool is None:
+            return self._principal, self._context
+        self._context = await build_principal_context(self._principal, self._session_pool)
         return self._principal, self._context
 
 
@@ -154,3 +183,21 @@ class HostedContextResolver:
         """Drop a cached context (e.g. after a credential/session change)."""
         async with self._lock:
             self._cache.pop(subject, None)
+
+    async def refresh(self) -> tuple[Principal, PrincipalContext]:
+        """Invalidate the current subject's cached context, then rebuild it.
+
+        Reads the same per-request access token ``resolve()`` does, so this
+        always refreshes the caller's own subject, never another one's.
+        """
+        access_token = get_access_token()
+        if access_token is None or not access_token.subject:
+            raise AuthenticationError(
+                ErrorInfo(
+                    "missing_access_token",
+                    "No authenticated subject for this request.",
+                    "Reconnect and sign in again.",
+                )
+            )
+        await self.invalidate(access_token.subject)
+        return await self.resolve()

@@ -14,7 +14,7 @@ gate, file boundary, acceptance criteria and who should implement it under the
 | 3. Read models | **Done** — slice B, offline, 2026-09-25. Live reads already show `attendeeIds`, `attendees`, `toAll` and `editable` on events, and `assignee`, `assigneeIds` and `toAll` on tasks | [handoff](../handoffs/09b-member-resolver.md), contracts |
 | 4. List assignment | Not started | — |
 | 5. Generalized receipts | **Done** (slice D, offline). `OperationReceipt.list_id` is now `resource_id` with an `action` field and a `rejected` status; legacy SQLite databases migrate in place | [handoff 09d](../handoffs/09d-receipts-migration.md) |
-| 6. Calendar attendees | **Create, self-only, done** (`create_calendar_event`). Attendee selection and `set_calendar_event_attendees` are not started | PR #9 |
+| 6. Calendar attendees | **Create with `assigned_to`, default everyone, done** (`create_calendar_event`, slice C, offline 2026-09-25). `set_calendar_event_attendees` (editing an existing event) is not started | PR #9; [handoff 09c](../handoffs/09c-calendar-attendees.md) |
 
 ## Decisions (settled by the account owner, 2026-09-25)
 
@@ -68,7 +68,7 @@ gate, file boundary, acceptance criteria and who should implement it under the
 | A2 | List assignment and update evidence | an owner sign-in | **done 2026-09-25** |
 | B | Member resolver, `list_family_members`, assignment read models | — | **done 2026-09-25** |
 | D | Generalized receipts and migration | — | **done 2026-09-25** |
-| C | Attendees on `create_calendar_event`, default everyone | A1, B | after A1 and B |
+| C | Attendees on `create_calendar_event`, default everyone | A1, B | **done 2026-09-25**, offline |
 | E | `set_calendar_event_attendees` | A1, B, D | after those |
 | F | List assignment, single-call `taskcreate2` add, `set_list_item_assignees` | A2, B, D | after those |
 | G | Live acceptance and docs | each slice | per slice |
@@ -231,6 +231,11 @@ Files: new `services/members.py`; `familywall/calendar.py` and
 
 ## Slice C — Attendees on `create_calendar_event`
 
+**Status: done 2026-09-25, offline.** Implemented per
+[brief 09c](09c-calendar-attendees.md); see
+[handoff 09c](../handoffs/09c-calendar-attendees.md) for the full evidence
+(tests C1–C15).
+
 **Implementer:** cheap agent from this card after A1 and B land. Lead reviews
 the confirmation logic.
 
@@ -246,6 +251,13 @@ Files: `familywall/calendar.py` (builder), `services/calendar.py`,
   than guessing.
 - `build_create_event_fields` takes a `ResolvedAssignment` and emits exactly the
   A1-verified encoding. Everyone mode is built only if A1 verified it.
+  - **As implemented (brief 09c, decision 3), this bullet's plan was
+    corrected:** the adapter layer must not import `services`, so
+    `build_create_event_fields` takes `to_all: bool` and
+    `attendee_account_ids: Sequence[str]` directly (already-resolved account
+    IDs), not a `ResolvedAssignment`. `services/calendar.py`'s
+    `create_event` is what takes the `ResolvedAssignment` and unpacks it for
+    the builder.
 - Confirmation extends to the attendee set (order-insensitive) and `toAll`. A
   difference is `mismatched`, with an `attendees` field name.
 - The payload hash already covers the attendee fields, so replay and conflict
@@ -256,12 +268,12 @@ Files: `familywall/calendar.py` (builder), `services/calendar.py`,
   (decision 4), and add the reminder to the readback comparison.
 
 **Acceptance:**
-- [ ] Full-form tests for self, two named members and everyone. Display names
+- [x] Full-form tests for self, two named members and everyone. Display names
   never appear in the form.
-- [ ] Readback with a missing or extra attendee is `mismatched`.
-- [ ] Omitting `assigned_to`, or passing `[]`, sends the A1-verified everyone
+- [x] Readback with a missing or extra attendee is `mismatched`.
+- [x] Omitting `assigned_to`, or passing `[]`, sends the A1-verified everyone
   form.
-- [ ] Naming only the signed-in member sends the single-attendee form that
+- [x] Naming only the signed-in member sends the single-attendee form that
   PR #9 verified.
 
 ## Slice D — Generalized receipts and migration

@@ -10,9 +10,12 @@ from tests.support.calendar_fixtures import (
     bare_event_array,
     birthday_account_event,
     event_with_assignment_fields,
+    event_with_empty_reminder_list,
     event_with_malformed_attendee_ids,
     event_with_malformed_editable,
+    event_with_malformed_reminder_list,
     event_with_malformed_to_all,
+    event_with_reminder,
     malformed_event,
     multiday_all_day_event,
     recurring_series_occurrence_1,
@@ -29,6 +32,7 @@ from tests.support.calendar_fixtures import (
 from familywall_mcp.errors import MalformedPayloadError
 from familywall_mcp.familywall.calendar import (
     AllDaySpan,
+    EventReminder,
     TimedSpan,
     build_create_event_fields,
     build_interval_fields,
@@ -313,8 +317,50 @@ class TestIntervalFields:
 class TestBuildCreateEventFields:
     """Test the evtcreate form builder."""
 
-    def test_complete_form_for_a_timed_event(self) -> None:
-        """The whole form is asserted, so an added or dropped field fails loudly."""
+    def test_c1_complete_form_for_everyone(self) -> None:
+        """C1: everyone sends isToAll=true, every member's attendee.N.accountId
+        in discovery order, and the three default-reminder fields."""
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo("Australia/Sydney")
+        fields = build_create_event_fields(
+            title="Family dinner",
+            start=datetime(2026, 10, 6, 18, 0, tzinfo=tz),
+            end=datetime(2026, 10, 6, 19, 0, tzinfo=tz),
+            timezone="Australia/Sydney",
+            to_all=True,
+            attendee_account_ids=("acct-synthetic-1", "acct-synthetic-2", "acct-synthetic-3"),
+            location="Main St",
+            description="Roast night",
+        )
+
+        assert fields == {
+            "partnerScope": "Family",
+            "text": "Family dinner",
+            "startDate": "2026-10-06T18:00:00+11:00",
+            "endDate": "2026-10-06T19:00:00+11:00",
+            "timeZone": "Australia/Sydney",
+            "where": "Main St",
+            "description": "Roast night",
+            "isToAll": "true",
+            "attendee.0.accountId": "acct-synthetic-1",
+            "attendee.1.accountId": "acct-synthetic-2",
+            "attendee.2.accountId": "acct-synthetic-3",
+            "picture": "$empty",
+            "private": "",
+            "recurrency": "NONE",
+            "recurrencyInterval": "1",
+            "byDay": "",
+            "byMonthDay": "",
+            "recurrencyEndDate": "$empty",
+            "reminderList.0.reminderType": "SNOOZE",
+            "reminderList.0.reminderUnit": "MINUTE",
+            "reminderList.0.reminderValue": "30",
+        }
+
+    def test_c2_complete_form_for_named_members(self) -> None:
+        """C2: named members send isToAll=false and the given IDs, in the
+        given order (not discovery order)."""
         from zoneinfo import ZoneInfo
 
         tz = ZoneInfo("Australia/Sydney")
@@ -323,7 +369,8 @@ class TestBuildCreateEventFields:
             start=datetime(2026, 10, 6, 10, 0, tzinfo=tz),
             end=datetime(2026, 10, 6, 11, 0, tzinfo=tz),
             timezone="Australia/Sydney",
-            attendee_account_id="acct-synthetic-1",
+            to_all=False,
+            attendee_account_ids=("acct-synthetic-2", "acct-synthetic-1"),
             location="Main St",
             description="Checkup",
         )
@@ -337,7 +384,8 @@ class TestBuildCreateEventFields:
             "where": "Main St",
             "description": "Checkup",
             "isToAll": "false",
-            "attendee.0.accountId": "acct-synthetic-1",
+            "attendee.0.accountId": "acct-synthetic-2",
+            "attendee.1.accountId": "acct-synthetic-1",
             "picture": "$empty",
             "private": "",
             "recurrency": "NONE",
@@ -345,8 +393,44 @@ class TestBuildCreateEventFields:
             "byDay": "",
             "byMonthDay": "",
             "recurrencyEndDate": "$empty",
-            "reminderList": "$empty",
+            "reminderList.0.reminderType": "SNOOZE",
+            "reminderList.0.reminderUnit": "MINUTE",
+            "reminderList.0.reminderValue": "30",
         }
+
+    def test_c3_builder_rejects_empty_attendees_and_never_emits_a_name(self) -> None:
+        """C3: an empty attendee_account_ids is rejected regardless of to_all;
+        nothing resembling a resolved display name (which this function never
+        receives in the first place) appears in the emitted form."""
+        with pytest.raises(ValueError):
+            build_create_event_fields(
+                title="Call",
+                start=datetime(2026, 10, 6, 10, 0, tzinfo=UTC),
+                end=datetime(2026, 10, 6, 11, 0, tzinfo=UTC),
+                timezone="UTC",
+                to_all=False,
+                attendee_account_ids=(),
+            )
+        with pytest.raises(ValueError):
+            build_create_event_fields(
+                title="Call",
+                start=datetime(2026, 10, 6, 10, 0, tzinfo=UTC),
+                end=datetime(2026, 10, 6, 11, 0, tzinfo=UTC),
+                timezone="UTC",
+                to_all=True,
+                attendee_account_ids=(),
+            )
+
+        fields = build_create_event_fields(
+            title="Call",
+            start=datetime(2026, 10, 6, 10, 0, tzinfo=UTC),
+            end=datetime(2026, 10, 6, 11, 0, tzinfo=UTC),
+            timezone="UTC",
+            to_all=False,
+            attendee_account_ids=("acct-synthetic-1", "acct-synthetic-2"),
+        )
+        never_sent = {"Alex", "Robin", "Sam", "Jordan"}
+        assert never_sent.isdisjoint(fields.values())
 
     def test_never_hard_codes_london(self) -> None:
         """The reference client's Europe/London default must not leak through."""
@@ -358,7 +442,8 @@ class TestBuildCreateEventFields:
             start=datetime(2026, 11, 1, 9, 0, tzinfo=tz),
             end=datetime(2026, 11, 1, 9, 30, tzinfo=tz),
             timezone="America/New_York",
-            attendee_account_id="acct-synthetic-1",
+            to_all=False,
+            attendee_account_ids=("acct-synthetic-1",),
         )
         assert fields["timeZone"] == "America/New_York"
         assert fields["startDate"] == "2026-11-01T09:00:00-05:00"
@@ -370,7 +455,8 @@ class TestBuildCreateEventFields:
             start=datetime(2026, 10, 6, 0, 0, tzinfo=UTC),
             end=datetime(2026, 10, 6, 1, 0, tzinfo=UTC),
             timezone="UTC",
-            attendee_account_id="acct-synthetic-1",
+            to_all=False,
+            attendee_account_ids=("acct-synthetic-1",),
         )
         assert fields["where"] == ""
         assert fields["description"] == ""
@@ -383,7 +469,8 @@ class TestBuildCreateEventFields:
                 start=datetime(2026, 10, 6, 10, 0),
                 end=datetime(2026, 10, 6, 11, 0),
                 timezone="UTC",
-                attendee_account_id="acct-synthetic-1",
+                to_all=False,
+                attendee_account_ids=("acct-synthetic-1",),
             )
 
 
@@ -453,3 +540,41 @@ class TestAssignmentFields:
 
         assert len(result.events) == 0
         assert result.skipped == 1
+
+
+class TestReminderField:
+    """C14: CalendarEvent.reminders parses verbatim, defaults sensibly, and a
+    malformed reminderList never skips the event."""
+
+    def test_c14_present_reminder_list_parses_verbatim(self) -> None:
+        """A present reminderList parses to a tuple of EventReminder, verbatim."""
+        payload = [event_with_reminder()]
+        result = parse_events(payload)
+
+        assert result.skipped == 0
+        event = result.events[0]
+        assert event.reminders == (EventReminder(type="SNOOZE", unit="MINUTE", value="30"),)
+
+    def test_c14_absent_reminder_list_gives_none(self) -> None:
+        """An event with no reminderList field at all gives reminders=None."""
+        payload = [event_with_assignment_fields()]
+        result = parse_events(payload)
+
+        assert result.events[0].reminders is None
+
+    def test_c14_empty_reminder_list_gives_empty_tuple(self) -> None:
+        """An explicit empty reminderList gives reminders=(), not None."""
+        payload = [event_with_empty_reminder_list()]
+        result = parse_events(payload)
+
+        assert result.events[0].reminders == ()
+
+    def test_c14_malformed_reminder_list_gives_none_and_does_not_skip(self) -> None:
+        """A malformed reminderList gives reminders=None; the event is NOT
+        skipped, unlike a malformed attendeeIds/toAll/editable."""
+        payload = [event_with_malformed_reminder_list()]
+        result = parse_events(payload)
+
+        assert result.skipped == 0
+        assert len(result.events) == 1
+        assert result.events[0].reminders is None

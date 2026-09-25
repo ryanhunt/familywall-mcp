@@ -207,6 +207,41 @@ def event_with_malformed_editable() -> dict:
     return event
 
 
+def event_with_reminder() -> dict:
+    """A timed event with the web app's default single reminder present."""
+    event = event_with_assignment_fields()
+    event["eventId"] = "evt-reminder-present"
+    event["eventMasterId"] = "evt-reminder-present"
+    event["reminderList"] = [
+        {
+            "localId": "reminder-1",
+            "reminderType": "SNOOZE",
+            "reminderUnit": "MINUTE",
+            "reminderValue": "30",
+        }
+    ]
+    return event
+
+
+def event_with_empty_reminder_list() -> dict:
+    """A timed event whose reminderList is present but an explicit empty list."""
+    event = event_with_assignment_fields()
+    event["eventId"] = "evt-reminder-empty"
+    event["eventMasterId"] = "evt-reminder-empty"
+    event["reminderList"] = []
+    return event
+
+
+def event_with_malformed_reminder_list() -> dict:
+    """A timed event whose reminderList is malformed (not a list of reminder
+    objects). Unlike attendeeIds/toAll/editable, this must NOT skip the event."""
+    event = event_with_assignment_fields()
+    event["eventId"] = "evt-reminder-malformed"
+    event["eventMasterId"] = "evt-reminder-malformed"
+    event["reminderList"] = "not-a-list"
+    return event
+
+
 def bare_event_array() -> list:
     """A bare array of events (the real shape from FamilyWall)."""
     return [
