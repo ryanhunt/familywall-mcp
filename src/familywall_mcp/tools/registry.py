@@ -19,7 +19,11 @@ from familywall_mcp.interfaces import ReceiptRepository
 from familywall_mcp.models import DomainModel
 from familywall_mcp.services.calendar import CalendarService, NewTimedEvent
 from familywall_mcp.services.lists import ListService
-from familywall_mcp.services.members import describe_assignment
+from familywall_mcp.services.members import (
+    MemberSelectionError,
+    describe_assignment,
+    resolve_members,
+)
 from familywall_mcp.services.principal_context import ContextResolver
 from familywall_mcp.services.ranges import resolve_event_time
 from familywall_mcp.services.session import SessionPool
@@ -125,7 +129,9 @@ class CreateCalendarEventResponse(DomainModel):
     family_name: str
     outcome: str
     event_id: str | None
-    assigned_to: str
+    assigned_to: tuple[str, ...]
+    """Display names only, never account IDs; every member's name for everyone."""
+    assigned_to_everyone: bool
     timezone: str
     start: str  # local ISO datetime as requested
     end: str
@@ -237,13 +243,16 @@ class ToolRegistry:
         server.tool(
             name="create_calendar_event",
             description=(
-                "Create one timed, non-recurring event on the family calendar, assigned "
-                "to the signed-in member. start and end are local times such as "
+                "Create one timed, non-recurring event on the family calendar. "
+                "assigned_to takes member names exactly as list_family_members shows them "
+                "(display or first name); omit it, or pass an empty list, to assign "
+                "everyone in the family. start and end are local times such as "
                 "2026-10-06T10:00 in timezone (default: the member's FamilyWall timezone), "
-                "or RFC 3339 times with an offset. All-day and recurring events and other "
-                "attendees are not supported. Outcome is confirmed only when a readback "
-                "matches the request; mismatched means the event exists but differs. "
-                "Without idempotency_key, retries will create duplicate events."
+                "or RFC 3339 times with an offset. The event gets FamilyWall's default "
+                "30-minute reminder. All-day and recurring events are not supported. "
+                "Outcome is confirmed only when a readback matches the request; mismatched "
+                "means the event exists but differs. Without idempotency_key, retries will "
+                "create duplicate events."
             ),
             annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
         )(self._create_calendar_event)
@@ -531,9 +540,10 @@ class ToolRegistry:
         timezone: str | None = None,
         location: str | None = None,
         description: str | None = None,
+        assigned_to: list[str] | None = None,
         idempotency_key: str | None = None,
     ) -> CreateCalendarEventResponse | ErrorResponse:
-        """Create a timed event on the family calendar, assigned to the signed-in member.
+        """Create a timed event on the family calendar, assigned per ``assigned_to``.
 
         If writes are disabled, returns an error response with zero upstream calls.
         Invalid input is rejected before any write.
@@ -545,6 +555,11 @@ class ToolRegistry:
             timezone: IANA timezone; defaults to the authenticated member's timezone.
             location: Optional location.
             description: Optional description.
+            assigned_to: Member names to assign, exactly as list_family_members shows
+                them. ``None`` or ``[]`` means everyone. Resolved against the cached
+                family discovery before any write; a name unknown to that cache
+                triggers exactly one discovery refresh and a second resolution
+                attempt (never for an ambiguous or otherwise invalid name).
             idempotency_key: Optional operation ID for idempotency; generates UUID if not provided.
 
         Returns:
@@ -576,6 +591,16 @@ class ToolRegistry:
             except ValueError as exc:
                 return _invalid_event(str(exc))
 
+            try:
+                assignment = resolve_members(assigned_to, ctx.discovered_family)
+            except MemberSelectionError as exc:
+                if exc.info.code != "unknown_member":
+                    raise
+                # The cached family list may simply be stale: refresh discovery
+                # once and try again. A second failure (of any kind) propagates.
+                principal, ctx = await self._context_resolver.refresh()
+                assignment = resolve_members(assigned_to, ctx.discovered_family)
+
             transport = write_transport(self._session_pool, principal)
             service = CalendarService(transport)
 
@@ -585,18 +610,18 @@ class ToolRegistry:
             result = await service.create_event(
                 principal,
                 request,
+                assignment,
                 operation_id,
                 self._receipt_repository,
                 ctx.family_context,
             )
 
-            members = ctx.discovered_family.members
-            assigned_to = next((m.display_name for m in members if m.is_authenticated_member), "")
             return CreateCalendarEventResponse(
                 family_name=ctx.discovered_family.name,
                 outcome=result.outcome.value,
                 event_id=result.event_id,
-                assigned_to=assigned_to,
+                assigned_to=assignment.display_names,
+                assigned_to_everyone=assignment.to_all,
                 timezone=request.timezone,
                 start=request.start.isoformat(),
                 end=request.end.isoformat(),

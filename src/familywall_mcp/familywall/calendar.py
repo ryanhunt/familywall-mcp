@@ -12,6 +12,7 @@ Key design principles:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date, datetime
 from typing import Any
 
@@ -38,6 +39,19 @@ class AllDaySpan(DomainModel):
 
     end_date: date
     """Calendar date, taken verbatim from the UTC date component."""
+
+
+class EventReminder(DomainModel):
+    """One reminder entry from an event's ``reminderList``, held verbatim."""
+
+    type: str
+    """Verbatim ``reminderType`` (e.g. ``"SNOOZE"``)."""
+
+    unit: str
+    """Verbatim ``reminderUnit`` (e.g. ``"MINUTE"``)."""
+
+    value: str
+    """Verbatim ``reminderValue`` (e.g. ``"30"``)."""
 
 
 class CalendarEvent(DomainModel):
@@ -96,6 +110,11 @@ class CalendarEvent(DomainModel):
 
     editable: bool | None = None
     """Whether the signed-in member can edit this event (from editable); None when absent."""
+
+    reminders: tuple[EventReminder, ...] | None = None
+    """Reminders from ``reminderList``, verbatim. ``None`` when the field is absent
+    or malformed (a malformed value never skips the event: reminders are not
+    needed for reads); ``()`` when the field is present but empty."""
 
 
 class ParsedEvents(DomainModel):
@@ -252,6 +271,11 @@ def _parse_single_event(obj: Any) -> CalendarEvent:
     editable_raw = obj.get("editable")
     editable: bool | None = coerce_bool(editable_raw) if editable_raw is not None else None
 
+    # reminderList: a malformed value gives None rather than skipping the
+    # event (reminders are not needed for reads, unlike attendeeIds/toAll/
+    # editable above, which are load-bearing for assignment).
+    reminders = _parse_reminders(obj.get("reminderList"))
+
     # Parse the time span
     try:
         span = _parse_span(raw_start, raw_end, all_day)
@@ -277,7 +301,46 @@ def _parse_single_event(obj: Any) -> CalendarEvent:
         attendee_ids=attendee_ids,
         to_all=to_all,
         editable=editable,
+        reminders=reminders,
     )
+
+
+def _parse_reminders(reminder_list_raw: Any) -> tuple[EventReminder, ...] | None:
+    """Parse ``reminderList`` verbatim, tolerating any malformed shape.
+
+    Unlike the assignment fields, a malformed ``reminderList`` never fails the
+    whole event: reminders are not needed for reads, so this returns ``None``
+    instead of raising.
+
+    Args:
+        reminder_list_raw: The raw ``reminderList`` value, or ``None`` if absent.
+
+    Returns:
+        ``None`` if absent or malformed; ``()`` if present and empty; otherwise
+        a tuple of ``EventReminder`` parsed from each entry's ``reminderType``,
+        ``reminderUnit`` and ``reminderValue``.
+    """
+    if reminder_list_raw is None or not isinstance(reminder_list_raw, list):
+        return None
+
+    reminders: list[EventReminder] = []
+    for entry in reminder_list_raw:
+        if not isinstance(entry, dict):
+            return None
+        reminder_type = entry.get("reminderType")
+        reminder_unit = entry.get("reminderUnit")
+        reminder_value = entry.get("reminderValue")
+        if not (
+            isinstance(reminder_type, str)
+            and isinstance(reminder_unit, str)
+            and isinstance(reminder_value, str)
+        ):
+            return None
+        reminders.append(
+            EventReminder(type=reminder_type, unit=reminder_unit, value=reminder_value)
+        )
+
+    return tuple(reminders)
 
 
 def _parse_span(raw_start: str, raw_end: str, all_day: bool) -> TimedSpan | AllDaySpan:
@@ -357,7 +420,8 @@ def build_create_event_fields(
     start: datetime,
     end: datetime,
     timezone: str,
-    attendee_account_id: str,
+    to_all: bool,
+    attendee_account_ids: Sequence[str],
     location: str | None = None,
     description: str | None = None,
 ) -> dict[str, str]:
@@ -365,9 +429,16 @@ def build_create_event_fields(
 
     Evidence: the field set is source-derived from the reference client, whose
     hard-coded ``Europe/London`` timezone is replaced by the event's own zone.
-    ``isToAll=false`` with a single ``attendee.0.accountId`` is the only attendee
-    encoding observed live (browser probe, 2026-09-16). ``color`` is omitted
-    rather than invented.
+    Attendees and the reminder are as verified by probe A1 (2026-09-25,
+    ``docs/contracts/calendar.md#mutations``): everyone is ``isToAll=true``
+    **plus** an ``attendee.N.accountId`` for every member (not ``isToAll=true``
+    alone); named members are ``isToAll=false`` with ``attendee.0..N-1``, in
+    the given order. The default reminder (``SNOOZE``/``MINUTE``/``30``, the
+    web app's own default) replaces the previous ``reminderList=$empty``.
+    ``color`` is omitted rather than invented.
+
+    This function only ever receives resolved account IDs, never member
+    names: name resolution happens one layer up, before any wire call.
 
     ``start`` and ``end`` must already be in ``timezone``. They are sent as local
     wall-clock times carrying that zone's own offset, so the same instant results
@@ -379,7 +450,11 @@ def build_create_event_fields(
         start: Aware start datetime in ``timezone``.
         end: Aware exclusive end datetime in ``timezone``.
         timezone: IANA timezone name the event belongs to.
-        attendee_account_id: FamilyWall account ID of the single attendee.
+        to_all: Whether every family member is meant. When ``True``,
+            ``attendee_account_ids`` must still list every member (the
+            everyone encoding sends both).
+        attendee_account_ids: FamilyWall account IDs to send, in order. Never
+            empty, even for ``to_all=True``.
         location: Optional location.
         description: Optional description.
 
@@ -387,12 +462,14 @@ def build_create_event_fields(
         The complete evtcreate form fields.
 
     Raises:
-        ValueError: If a datetime is naive.
+        ValueError: If a datetime is naive, or ``attendee_account_ids`` is empty.
     """
     if start.tzinfo is None or end.tzinfo is None:
         raise ValueError("event start and end must be timezone-aware")
+    if not attendee_account_ids:
+        raise ValueError("attendee_account_ids must not be empty")
 
-    return {
+    fields: dict[str, str] = {
         "partnerScope": "Family",
         "text": title,
         "startDate": start.isoformat(timespec="seconds"),
@@ -400,17 +477,25 @@ def build_create_event_fields(
         "timeZone": timezone,
         "where": location or "",
         "description": description or "",
-        "isToAll": "false",
-        "attendee.0.accountId": attendee_account_id,
-        "picture": "$empty",
-        "private": "",
-        "recurrency": "NONE",
-        "recurrencyInterval": "1",
-        "byDay": "",
-        "byMonthDay": "",
-        "recurrencyEndDate": "$empty",
-        "reminderList": "$empty",
+        "isToAll": "true" if to_all else "false",
     }
+    for index, account_id in enumerate(attendee_account_ids):
+        fields[f"attendee.{index}.accountId"] = account_id
+    fields.update(
+        {
+            "picture": "$empty",
+            "private": "",
+            "recurrency": "NONE",
+            "recurrencyInterval": "1",
+            "byDay": "",
+            "byMonthDay": "",
+            "recurrencyEndDate": "$empty",
+            "reminderList.0.reminderType": "SNOOZE",
+            "reminderList.0.reminderUnit": "MINUTE",
+            "reminderList.0.reminderValue": "30",
+        }
+    )
+    return fields
 
 
 def parse_created_event_id(payload: object) -> str | None:

@@ -255,6 +255,22 @@ A daylight-saving instant is also verified: `2026-10-07T09:00` in
 `Australia/Sydney` (`+11:00`) was stored as `2026-10-06T22:00:00.000Z`, and the
 tool returned `confirmed` (2026-09-25).
 
+**Attendees and reminder (brief 09 slice C, offline, 2026-09-25).** The table
+above is what the tool sent before this slice; it now sends the encodings
+probe A1 verified for the web app itself, below. `assigned_to` (a list of
+member names, or `None`/`[]` for everyone) is resolved to account IDs against
+the cached family discovery before any write. Everyone is sent as
+`isToAll=true` **plus** an `attendee.N.accountId` for every discovered member
+(not `isToAll=true` alone); named members are sent as `isToAll=false` with
+`attendee.0..N-1.accountId` in the given order. `reminderList=$empty` is
+replaced by `reminderList.0.reminderType=SNOOZE`,
+`reminderList.0.reminderUnit=MINUTE` and `reminderList.0.reminderValue=30` —
+the web app's own default — for every created event. The readback
+confirmation was extended to match: the `attendees` field name covers a
+`toAll`/`attendeeIds` mismatch, and `reminder` covers a missing or different
+`reminderList`. This is unit-tested only (synthetic fixtures); the lead's live
+check of both attendee modes is the next step.
+
 ### Probe A1 — the web app's own forms (2026-09-25)
 
 Captured from the FamilyWall web app's `evtcreate`, `evtupdate` and `evtdelete`

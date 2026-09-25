@@ -85,6 +85,7 @@ write endpoint was called. Findings are recorded in
 | `evtcreate` all-day | **pass** — 2026-09-25; `allDay=true`, date-carrier instants, no `timeZone` field |
 | `evtupdate` attendee-only | **pass** — 2026-09-25; patch semantics: other fields unchanged, attendee set replaced by exactly the entries sent |
 | `create_calendar_event` daylight-saving instant | **pass** — 2026-09-25; `+11:00` stored correctly, `confirmed` |
+| `create_calendar_event` for everyone and for named members, with the default reminder | **pass** — 2026-09-25; both `confirmed` through the tool; readback `toAll` and attendees as sent, `SNOOZE`/`MINUTE`/`30` reminder |
 | `evtupdate` keeps an unsent non-empty `where`/`description`; all-day update | **pending** |
 | Task assignment: named and everyone (`taskupdate2`) | **pass** — 2026-09-25; `toAll` plus `assignee.N`; everyone reads back as every member |
 | `taskupdate2` partial update | **pass** — 2026-09-25; patch semantics: only the assignment changed; `description`, `dueDate` and reminder kept |

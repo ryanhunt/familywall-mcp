@@ -22,6 +22,7 @@ from familywall_mcp.services.calendar import (
     EventWriteOutcome,
     NewTimedEvent,
 )
+from familywall_mcp.services.members import ResolvedAssignment
 from familywall_mcp.storage.memory import InMemoryReceiptRepository
 
 SYDNEY = ZoneInfo("Australia/Sydney")
@@ -31,6 +32,18 @@ FAMILY = FamilyContext(
     family_id="family-123",
     calendar_id="calendar/family-123",
 )
+
+SELF_ONLY_ASSIGNMENT = ResolvedAssignment(
+    to_all=False, account_ids=("acct-self",), display_names=("Test Member",)
+)
+"""The pre-slice-C default: named to exactly the signed-in member (PR #9)."""
+
+DEFAULT_REMINDER_ENTRY = {
+    "localId": "reminder-1",
+    "reminderType": "SNOOZE",
+    "reminderUnit": "MINUTE",
+    "reminderValue": "30",
+}
 
 
 def new_event(**overrides: object) -> NewTimedEvent:
@@ -46,9 +59,13 @@ def new_event(**overrides: object) -> NewTimedEvent:
     return NewTimedEvent(**values)  # type: ignore[arg-type]
 
 
-def stored_event(**overrides: str) -> dict[str, str]:
-    """How the created event reads back: 10:00-11:00 Sydney is 23:00-00:00 UTC."""
-    event = {
+def stored_event(**overrides: object) -> dict[str, object]:
+    """How the created event reads back: 10:00-11:00 Sydney is 23:00-00:00 UTC.
+
+    Defaults to the self-only assignment (``SELF_ONLY_ASSIGNMENT``) and the
+    default 30-minute reminder, so a test only overrides what it means to vary.
+    """
+    event: dict[str, object] = {
         "eventId": "event/new-1",
         "eventMasterId": "event/new-1",
         "occurenceIndex": "0",
@@ -61,6 +78,9 @@ def stored_event(**overrides: str) -> dict[str, str]:
         "eventType": "UNKNOWN",
         "calendarId": "calendar/family-123",
         "where": "Main St",
+        "attendeeIds": ["acct-self"],
+        "toAll": "false",
+        "reminderList": [dict(DEFAULT_REMINDER_ENTRY)],
     }
     event.update(overrides)
     return event
@@ -87,7 +107,7 @@ class ScriptedTransport:
         return [endpoint for endpoint, _ in self.calls]
 
 
-def created_then_read(*readback: dict[str, str]) -> ScriptedTransport:
+def created_then_read(*readback: dict[str, object]) -> ScriptedTransport:
     return ScriptedTransport(
         {
             "evtcreate": {"eventId": "event/new-1", "text": "Dentist"},
@@ -101,10 +121,12 @@ async def create(
     receipts: InMemoryReceiptRepository | None = None,
     request: NewTimedEvent | None = None,
     operation_id: str = "op-1",
+    assignment: ResolvedAssignment | None = None,
 ) -> CreateEventResult:
     return await CalendarService(transport).create_event(
         PRINCIPAL,
         request or new_event(),
+        assignment or SELF_ONLY_ASSIGNMENT,
         operation_id,
         receipts or InMemoryReceiptRepository(),
         FAMILY,
@@ -121,7 +143,9 @@ class TestConfirmation:
         assert result.event_id == "event/new-1"
         assert transport.endpoints == ["evtcreate", "evtlistinterval"]
 
-    async def test_create_sends_the_verified_single_attendee_form(self) -> None:
+    async def test_c15_create_sends_the_verified_single_attendee_form(self) -> None:
+        """C15: naming only the signed-in member still sends the single-attendee
+        form (isToAll=false, one attendee.0.accountId) that PR #9 verified live."""
         transport = created_then_read(stored_event())
 
         await create(transport)
@@ -228,6 +252,126 @@ class TestConfirmation:
         assert result.event_id == "event/new-1"
 
 
+class TestAttendeesAndReminder:
+    """C4-C7: the everyone/named attendee encodings and the default reminder,
+    both in the sent form and in readback confirmation."""
+
+    async def test_c4_everyone_sends_every_member_and_confirms(self) -> None:
+        """C4: everyone sends isToAll=true with every member's ID, and a
+        matching readback (toAll:"true", no attendeeIds) is confirmed."""
+        assignment = ResolvedAssignment(
+            to_all=True,
+            account_ids=("acct-alex", "acct-robin", "acct-sam"),
+            display_names=("Alex", "Robin", "Sam"),
+        )
+        transport = created_then_read(stored_event(attendeeIds=[], toAll="true"))
+
+        result = await create(transport, assignment=assignment)
+
+        assert result.outcome is EventWriteOutcome.CONFIRMED
+        _, fields = transport.calls[0]
+        assert fields["isToAll"] == "true"
+        assert fields["attendee.0.accountId"] == "acct-alex"
+        assert fields["attendee.1.accountId"] == "acct-robin"
+        assert fields["attendee.2.accountId"] == "acct-sam"
+
+    async def test_c5_named_members_confirm_with_ids_in_a_different_order(self) -> None:
+        """C5: readback attendee order does not matter for confirmation."""
+        assignment = ResolvedAssignment(
+            to_all=False,
+            account_ids=("acct-alex", "acct-robin"),
+            display_names=("Alex", "Robin"),
+        )
+        transport = created_then_read(
+            stored_event(attendeeIds=["acct-robin", "acct-alex"], toAll="false")
+        )
+
+        result = await create(transport, assignment=assignment)
+
+        assert result.outcome is EventWriteOutcome.CONFIRMED
+        _, fields = transport.calls[0]
+        assert fields["isToAll"] == "false"
+        assert fields["attendee.0.accountId"] == "acct-alex"
+        assert fields["attendee.1.accountId"] == "acct-robin"
+
+    @pytest.mark.parametrize(
+        ("assignment", "readback_overrides"),
+        [
+            (
+                ResolvedAssignment(
+                    to_all=False,
+                    account_ids=("acct-alex", "acct-robin"),
+                    display_names=("Alex", "Robin"),
+                ),
+                {"attendeeIds": ["acct-alex"], "toAll": "false"},  # missing acct-robin
+            ),
+            (
+                ResolvedAssignment(
+                    to_all=False, account_ids=("acct-alex",), display_names=("Alex",)
+                ),
+                {"attendeeIds": ["acct-alex", "acct-robin"], "toAll": "false"},  # extra ID
+            ),
+            (
+                ResolvedAssignment(
+                    to_all=True,
+                    account_ids=("acct-alex", "acct-robin"),
+                    display_names=("Alex", "Robin"),
+                ),
+                {"attendeeIds": [], "toAll": "false"},  # everyone requested, toAll false
+            ),
+        ],
+        ids=["missing_id", "extra_id", "everyone_but_toall_false"],
+    )
+    async def test_c6_attendees_mismatch_cases(
+        self, assignment: ResolvedAssignment, readback_overrides: dict[str, object]
+    ) -> None:
+        transport = created_then_read(stored_event(**readback_overrides))
+
+        result = await create(transport, assignment=assignment)
+
+        assert result.outcome is EventWriteOutcome.MISMATCHED
+        assert "attendees" in result.mismatched_fields
+
+    async def test_c7_missing_reminder_is_mismatched(self) -> None:
+        """C7: a readback with no reminderList at all is mismatched."""
+        event = stored_event()
+        del event["reminderList"]
+        transport = created_then_read(event)
+
+        result = await create(transport)
+
+        assert result.outcome is EventWriteOutcome.MISMATCHED
+        assert "reminder" in result.mismatched_fields
+
+    @pytest.mark.parametrize(
+        "readback_overrides",
+        [
+            {"reminderList": []},
+            {
+                "reminderList": [
+                    {
+                        "localId": "reminder-1",
+                        "reminderType": "SNOOZE",
+                        "reminderUnit": "HOUR",
+                        "reminderValue": "1",
+                    }
+                ]
+            },
+        ],
+        ids=["empty_reminder_list", "different_reminder"],
+    )
+    async def test_c7_different_reminder_is_mismatched(
+        self, readback_overrides: dict[str, object]
+    ) -> None:
+        """C7: a readback with a different reminder is mismatched."""
+        transport = created_then_read(stored_event(**readback_overrides))
+
+        result = await create(transport)
+
+        assert result.outcome is EventWriteOutcome.MISMATCHED
+        assert "reminder" in result.mismatched_fields
+
+
 class TestAcknowledgedAndUnknown:
     async def test_readback_failure_is_acknowledged(self) -> None:
         transport = ScriptedTransport(
@@ -306,6 +450,22 @@ class TestReceipts:
 
         with pytest.raises(FamilyWallError) as excinfo:
             await create(transport, receipts, request=new_event(title="Physio"))
+
+        assert excinfo.value.info.code == "operation_id_conflict"
+        assert transport.calls == []
+
+    async def test_c11_reused_key_with_a_different_assignment_conflicts(self) -> None:
+        """C11: the same idempotency key with a different assignment (as a
+        different assigned_to would resolve to) is a conflict, zero calls."""
+        receipts = InMemoryReceiptRepository()
+        await create(created_then_read(stored_event()), receipts)
+        transport = ScriptedTransport({})
+        different_assignment = ResolvedAssignment(
+            to_all=False, account_ids=("acct-robin",), display_names=("Robin",)
+        )
+
+        with pytest.raises(FamilyWallError) as excinfo:
+            await create(transport, receipts, assignment=different_assignment)
 
         assert excinfo.value.info.code == "operation_id_conflict"
         assert transport.calls == []
@@ -429,7 +589,12 @@ class TestReceipts:
         other = created_then_read(stored_event())
 
         result = await CalendarService(other).create_event(
-            Principal(subject="subject-b"), new_event(), "op-1", receipts, FAMILY
+            Principal(subject="subject-b"),
+            new_event(),
+            SELF_ONLY_ASSIGNMENT,
+            "op-1",
+            receipts,
+            FAMILY,
         )
 
         assert result.outcome is EventWriteOutcome.CONFIRMED

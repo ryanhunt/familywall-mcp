@@ -114,11 +114,18 @@ class FakeSessionPool:
         pass
 
 
-def _stored_event(event_id: str, form: dict[str, str]) -> dict[str, str]:
-    """How an evtcreate form reads back: instants re-stamped in UTC."""
+def _stored_event(event_id: str, form: dict[str, str]) -> dict[str, object]:
+    """How an evtcreate form reads back: instants re-stamped in UTC, and the
+    attendee/reminder fields mirrored back exactly as sent."""
 
     def utc(value: str) -> str:
         return datetime.fromisoformat(value).astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    attendee_ids = []
+    index = 0
+    while f"attendee.{index}.accountId" in form:
+        attendee_ids.append(form[f"attendee.{index}.accountId"])
+        index += 1
 
     return {
         "eventId": event_id,
@@ -134,6 +141,16 @@ def _stored_event(event_id: str, form: dict[str, str]) -> dict[str, str]:
         "calendarId": "calendar/1",
         "where": form["where"],
         "description": form["description"],
+        "attendeeIds": [] if form["isToAll"] == "true" else attendee_ids,
+        "toAll": form["isToAll"],
+        "reminderList": [
+            {
+                "localId": "reminder-1",
+                "reminderType": form["reminderList.0.reminderType"],
+                "reminderUnit": form["reminderList.0.reminderUnit"],
+                "reminderValue": form["reminderList.0.reminderValue"],
+            }
+        ],
     }
 
 
@@ -186,6 +203,88 @@ def create_discovered_family() -> DiscoveredFamily:
             ),
         ),
     )
+
+
+def create_family_with_ambiguous_members() -> DiscoveredFamily:
+    """A family where two members share a first name, for an ambiguous_member case."""
+    return DiscoveredFamily(
+        family_id="family/1",
+        family_meta_id="family/1",
+        calendar_id="calendar/1",
+        name="The Test Family",
+        members=(
+            FamilyMember(
+                account_id="acct/1",
+                display_name="Jordan Alex",
+                first_name="Jordan",
+                timezone="Australia/Sydney",
+                is_authenticated_member=True,
+            ),
+            FamilyMember(
+                account_id="acct/2",
+                display_name="Jordan Robin",
+                first_name="Jordan",
+                timezone="Europe/London",
+                is_authenticated_member=False,
+            ),
+        ),
+    )
+
+
+def _refreshed_family_payload() -> dict[str, object]:
+    """The raw accgetallfamily payload once a new member ('Jordan Lee') exists.
+
+    ``family_id: "1"`` (not the fixture's "family/1") so the parsed
+    ``calendar_id`` still comes out as "calendar/1", matching the hardcoded
+    ``calendarId`` in ``_stored_event`` above.
+    """
+    return {
+        "family_id": "1",
+        "metaId": "family/1",
+        "name": "The Test Family",
+        "members": [
+            {
+                "accountId": "acct/1",
+                "name": "Test Member",
+                "firstName": "Test",
+                "timeZone": "Australia/Sydney",
+                "isloggedaccount": "true",
+            },
+            {
+                "accountId": "acct/2",
+                "name": "Other Member",
+                "firstName": "Other",
+                "timeZone": "Europe/London",
+                "isloggedaccount": "false",
+            },
+            {
+                "accountId": "acct/3",
+                "name": "Jordan Lee",
+                "firstName": "Jordan",
+                "timeZone": "Europe/London",
+                "isloggedaccount": "false",
+            },
+        ],
+    }
+
+
+class FakeSessionPoolWithDiscoveryRefresh(FakeSessionPool):
+    """A FakeSessionPool whose accgetallfamily answers with a richer family,
+    for testing ContextResolver.refresh() (C9, C10)."""
+
+    def __init__(self, refreshed_payload: dict[str, object]) -> None:
+        super().__init__()
+        self.refreshed_payload = refreshed_payload
+        self.discovery_calls = 0
+
+    async def call(
+        self, principal: Principal, endpoint: str, fields: dict[str, str], read_write: str
+    ) -> object:
+        if endpoint == "accgetallfamily":
+            self.calls.append((principal.subject, endpoint, dict(fields), read_write))
+            self.discovery_calls += 1
+            return self.refreshed_payload
+        return await super().call(principal, endpoint, fields, read_write)
 
 
 def create_registry(
@@ -516,8 +615,10 @@ async def test_create_calendar_event_is_blocked_by_the_write_gate() -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_calendar_event_confirms_in_the_members_timezone() -> None:
-    """Local times default to the member's zone; create and readback use write mode."""
+async def test_c15_create_calendar_event_defaults_to_everyone() -> None:
+    """C15: omitting assigned_to now means everyone (the old self-only default
+    was PR #9's, superseded by decision 1). Local times default to the
+    member's zone; create and readback use write mode."""
     registry, pool = create_registry(_writes_config(True), create_discovered_family())
 
     result = await registry._create_calendar_event(
@@ -531,7 +632,8 @@ async def test_create_calendar_event_confirms_in_the_members_timezone() -> None:
     assert isinstance(result, CreateCalendarEventResponse)
     assert result.outcome == "confirmed"
     assert result.event_id == "event/1"
-    assert result.assigned_to == "Test Member"
+    assert result.assigned_to == ("Test Member", "Other Member")
+    assert result.assigned_to_everyone is True
     assert result.timezone == "Australia/Sydney"
     assert result.start == "2026-10-06T10:00:00+11:00"
     assert result.end == "2026-10-06T11:00:00+11:00"
@@ -540,8 +642,36 @@ async def test_create_calendar_event_confirms_in_the_members_timezone() -> None:
         ("evtlistinterval", "write"),
     ]
     form = pool.calls[0][2]
+    assert form["isToAll"] == "true"
     assert form["attendee.0.accountId"] == "acct/1"
+    assert form["attendee.1.accountId"] == "acct/2"
     assert "Test Member" not in form.values()
+    assert "Other Member" not in form.values()
+
+
+@pytest.mark.asyncio
+async def test_c15_naming_only_the_signed_in_member_sends_the_single_attendee_form() -> None:
+    """C15: naming only the signed-in member still sends the single-attendee
+    form (isToAll=false, one attendee.0.accountId) that PR #9 verified live."""
+    registry, pool = create_registry(_writes_config(True), create_discovered_family())
+
+    result = await registry._create_calendar_event(
+        "Dentist",
+        "2026-10-06T10:00",
+        "2026-10-06T11:00",
+        assigned_to=["Test Member"],
+        idempotency_key="op-self-only",
+    )
+
+    assert isinstance(result, CreateCalendarEventResponse)
+    assert result.outcome == "confirmed"
+    assert result.assigned_to == ("Test Member",)
+    assert result.assigned_to_everyone is False
+
+    form = pool.calls[0][2]
+    assert form["isToAll"] == "false"
+    assert form["attendee.0.accountId"] == "acct/1"
+    assert not any(key.startswith("attendee.1") for key in form)
 
 
 @pytest.mark.asyncio
@@ -574,6 +704,146 @@ async def test_create_calendar_event_replays_an_idempotency_key() -> None:
     assert second.outcome == first.outcome == "confirmed"
     assert len(pool.calls) == calls_after_first
     assert len(pool.created_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_c8_unknown_member_with_no_refresh_available() -> None:
+    """C8: stdio has no session pool to refresh discovery with, so an unknown
+    name fails immediately, with zero upstream calls."""
+    registry, pool = create_registry(_writes_config(True), create_discovered_family())
+
+    result = await registry._create_calendar_event(
+        "Dentist", "2026-10-06T10:00", "2026-10-06T11:00", assigned_to=["Jordan"]
+    )
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error_code == "unknown_member"
+    assert pool.calls == []
+
+
+@pytest.mark.asyncio
+async def test_c9_unknown_member_found_after_one_refresh() -> None:
+    """C9: an unknown name that a discovery refresh does find succeeds after
+    exactly one refresh, and the second lookup uses the refreshed family."""
+    config = _writes_config(True)
+    discovered = create_discovered_family()
+    pool = FakeSessionPoolWithDiscoveryRefresh(_refreshed_family_payload())
+    principal = Principal(subject="test-subject")
+    family_context = FamilyContext(
+        account_id="acct/1", family_id="family/1", calendar_id="calendar/1"
+    )
+    context = PrincipalContext(
+        family_context=family_context,
+        discovered_family=discovered,
+        authenticated_member_timezone="Australia/Sydney",
+        calendar_service=FakeCalendarService(),  # type: ignore[arg-type]
+    )
+    registry = ToolRegistry(
+        config=config,
+        session_pool=pool,  # type: ignore[arg-type]
+        context_resolver=FixedContextResolver(principal, context, pool),  # type: ignore[arg-type]
+        receipt_repository=InMemoryReceiptRepository(),
+    )
+
+    result = await registry._create_calendar_event(
+        "Dentist",
+        "2026-10-06T10:00",
+        "2026-10-06T11:00",
+        assigned_to=["Jordan"],
+        idempotency_key="op-jordan",
+    )
+
+    assert isinstance(result, CreateCalendarEventResponse)
+    assert result.outcome == "confirmed"
+    assert result.assigned_to == ("Jordan Lee",)
+    assert result.assigned_to_everyone is False
+    assert pool.discovery_calls == 1
+
+    endpoint_calls = [call[1] for call in pool.calls]
+    assert endpoint_calls.count("accgetallfamily") == 1
+    evtcreate_fields = next(
+        fields for _, endpoint, fields, _ in pool.calls if endpoint == "evtcreate"
+    )
+    assert evtcreate_fields["isToAll"] == "false"
+    assert evtcreate_fields["attendee.0.accountId"] == "acct/3"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("discovered", "assigned_to", "expected_code"),
+    [
+        (create_discovered_family(), ["   "], "invalid_member_name"),
+        (create_family_with_ambiguous_members(), ["Jordan"], "ambiguous_member"),
+    ],
+    ids=["invalid_member_name", "ambiguous_member"],
+)
+async def test_c10_ambiguous_or_invalid_name_never_refreshes(
+    discovered: DiscoveredFamily, assigned_to: list[str], expected_code: str
+) -> None:
+    """C10: an ambiguous or invalid name is refused without ever calling
+    refresh(), unlike unknown_member (C9). Uses a pool that would record a
+    discovery call if refresh() were (incorrectly) attempted."""
+    config = _writes_config(True)
+    pool = FakeSessionPoolWithDiscoveryRefresh(_refreshed_family_payload())
+    principal = Principal(subject="test-subject")
+    family_context = FamilyContext(
+        account_id="acct/1", family_id="family/1", calendar_id="calendar/1"
+    )
+    context = PrincipalContext(
+        family_context=family_context,
+        discovered_family=discovered,
+        authenticated_member_timezone="Australia/Sydney",
+        calendar_service=FakeCalendarService(),  # type: ignore[arg-type]
+    )
+    registry = ToolRegistry(
+        config=config,
+        session_pool=pool,  # type: ignore[arg-type]
+        context_resolver=FixedContextResolver(principal, context, pool),  # type: ignore[arg-type]
+        receipt_repository=InMemoryReceiptRepository(),
+    )
+
+    result = await registry._create_calendar_event(
+        "Dentist", "2026-10-06T10:00", "2026-10-06T11:00", assigned_to=assigned_to
+    )
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error_code == expected_code
+    assert pool.calls == []
+    assert pool.discovery_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_c12_response_names_and_no_account_id_leak() -> None:
+    """C12: assigned_to/assigned_to_everyone are correct for both modes, and
+    no account ID ever appears in the serialised response."""
+    registry, _pool = create_registry(_writes_config(True), create_discovered_family())
+
+    everyone_result = await registry._create_calendar_event(
+        "Family dinner",
+        "2026-10-06T18:00",
+        "2026-10-06T19:00",
+        idempotency_key="op-everyone",
+    )
+    named_result = await registry._create_calendar_event(
+        "Dentist",
+        "2026-10-07T10:00",
+        "2026-10-07T11:00",
+        assigned_to=["Test Member"],
+        idempotency_key="op-named",
+    )
+
+    assert isinstance(everyone_result, CreateCalendarEventResponse)
+    assert everyone_result.assigned_to == ("Test Member", "Other Member")
+    assert everyone_result.assigned_to_everyone is True
+
+    assert isinstance(named_result, CreateCalendarEventResponse)
+    assert named_result.assigned_to == ("Test Member",)
+    assert named_result.assigned_to_everyone is False
+
+    for result in (everyone_result, named_result):
+        serialised = result.model_dump_json()
+        assert "acct/1" not in serialised
+        assert "acct/2" not in serialised
 
 
 @pytest.mark.asyncio
