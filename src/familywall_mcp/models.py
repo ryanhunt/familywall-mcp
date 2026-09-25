@@ -79,6 +79,7 @@ class OperationReceipt(DomainModel):
     action: Literal[
         "list.add_item",
         "list.set_checked",
+        "list.set_assignees",
         "calendar.create_event",
         "calendar.set_attendees",
         "legacy",

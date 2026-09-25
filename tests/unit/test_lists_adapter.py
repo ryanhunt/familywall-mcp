@@ -8,7 +8,10 @@ import pytest
 from pydantic import ValidationError
 from tests.support.list_fixtures import (
     list_item_with_assignment_fields,
+    list_item_with_due_date_and_reminder,
     list_item_with_malformed_assignee_ids,
+    list_item_with_malformed_due_date,
+    list_item_with_malformed_reminder,
     list_item_with_malformed_to_all,
     list_item_without_assignment_fields,
     list_items_bare_array,
@@ -28,10 +31,12 @@ from familywall_mcp.familywall.lists import (
     ListType,
     ParsedItems,
     ShoppingList,
+    build_create2_item_fields,
     build_create_item_fields,
     build_get_list_fields,
     build_get_lists_fields,
     build_mark_item_fields,
+    build_update2_assignees_fields,
     parse_list_items,
     parse_list_summaries,
 )
@@ -633,3 +638,184 @@ class TestAssignmentFields:
 
         assert len(result.items) == 0
         assert result.skipped == 1
+
+
+class TestCreate2AndUpdate2Builders:
+    """F1: build_create2_item_fields and build_update2_assignees_fields."""
+
+    def test_f1_create2_complete_form_for_everyone(self) -> None:
+        """The complete taskcreate2 form for everyone, fields in the given order."""
+        fields = build_create2_item_fields(
+            list_id="taskList/101",
+            text="Bread",
+            to_all=True,
+            assignee_account_ids=("acc-alex", "acc-robin"),
+        )
+        assert fields == {
+            "partnerScope": "Family",
+            "taskListId": "taskList/101",
+            "text": "Bread",
+            "taskCategoryId": "",
+            "dueDate": "$empty",
+            "picture": "$empty",
+            "toAll": "true",
+            "assignee.0": "acc-alex",
+            "assignee.1": "acc-robin",
+        }
+        assert list(fields.keys()) == [
+            "partnerScope",
+            "taskListId",
+            "text",
+            "taskCategoryId",
+            "dueDate",
+            "picture",
+            "toAll",
+            "assignee.0",
+            "assignee.1",
+        ]
+
+    def test_f1_create2_complete_form_for_named_members(self) -> None:
+        """The complete taskcreate2 form for a single named member."""
+        fields = build_create2_item_fields(
+            list_id="taskList/101",
+            text="Bread",
+            to_all=False,
+            assignee_account_ids=("acc-sam",),
+        )
+        assert fields == {
+            "partnerScope": "Family",
+            "taskListId": "taskList/101",
+            "text": "Bread",
+            "taskCategoryId": "",
+            "dueDate": "$empty",
+            "picture": "$empty",
+            "toAll": "false",
+            "assignee.0": "acc-sam",
+        }
+
+    def test_f1_create2_rejects_empty_assignees(self) -> None:
+        """build_create2_item_fields rejects an empty ID list, for both to_all values."""
+        with pytest.raises(ValueError, match="assignee_account_ids"):
+            build_create2_item_fields(
+                list_id="taskList/101", text="Bread", to_all=True, assignee_account_ids=()
+            )
+        with pytest.raises(ValueError, match="assignee_account_ids"):
+            build_create2_item_fields(
+                list_id="taskList/101", text="Bread", to_all=False, assignee_account_ids=()
+            )
+
+    def test_f1_create2_rejects_wrong_list_prefix(self) -> None:
+        """build_create2_item_fields rejects a list_id without the taskList/ prefix."""
+        with pytest.raises(MalformedPayloadError):
+            build_create2_item_fields(
+                list_id="task/101", text="Bread", to_all=True, assignee_account_ids=("acc-sam",)
+            )
+
+    def test_f1_create2_never_emits_a_name(self) -> None:
+        """No display name ever appears in the taskcreate2 form."""
+        fields = build_create2_item_fields(
+            list_id="taskList/101",
+            text="Bread",
+            to_all=False,
+            assignee_account_ids=("acc-jordan",),
+        )
+        assert "Jordan" not in fields.values()
+
+    def test_f1_update2_complete_form_for_everyone(self) -> None:
+        """The complete partial taskupdate2 form for everyone."""
+        fields = build_update2_assignees_fields(
+            item_id="task/201", to_all=True, assignee_account_ids=("acc-alex", "acc-robin")
+        )
+        assert fields == {
+            "partnerScope": "Family",
+            "taskId": "task/201",
+            "toAll": "true",
+            "assignee.0": "acc-alex",
+            "assignee.1": "acc-robin",
+        }
+        assert list(fields.keys()) == [
+            "partnerScope",
+            "taskId",
+            "toAll",
+            "assignee.0",
+            "assignee.1",
+        ]
+
+    def test_f1_update2_complete_form_for_named_members(self) -> None:
+        """The complete partial taskupdate2 form for a single named member."""
+        fields = build_update2_assignees_fields(
+            item_id="task/201", to_all=False, assignee_account_ids=("acc-sam",)
+        )
+        assert fields == {
+            "partnerScope": "Family",
+            "taskId": "task/201",
+            "toAll": "false",
+            "assignee.0": "acc-sam",
+        }
+
+    def test_f1_update2_rejects_empty_assignees(self) -> None:
+        """build_update2_assignees_fields rejects an empty ID list, for both to_all values."""
+        with pytest.raises(ValueError, match="assignee_account_ids"):
+            build_update2_assignees_fields(item_id="task/201", to_all=True, assignee_account_ids=())
+        with pytest.raises(ValueError, match="assignee_account_ids"):
+            build_update2_assignees_fields(
+                item_id="task/201", to_all=False, assignee_account_ids=()
+            )
+
+    def test_f1_update2_rejects_wrong_item_prefix(self) -> None:
+        """build_update2_assignees_fields rejects an item_id without the task/ prefix."""
+        with pytest.raises(MalformedPayloadError):
+            build_update2_assignees_fields(
+                item_id="taskList/201", to_all=True, assignee_account_ids=("acc-sam",)
+            )
+
+    def test_f1_update2_never_emits_a_name(self) -> None:
+        """No display name ever appears in the taskupdate2 form."""
+        fields = build_update2_assignees_fields(
+            item_id="task/201", to_all=False, assignee_account_ids=("acc-jordan",)
+        )
+        assert "Jordan" not in fields.values()
+
+
+class TestDueDateAndReminderFields:
+    """F12: ListItem.due_date/reminder parse verbatim; absent or malformed gives
+    None, and the item is never skipped."""
+
+    def test_f12_due_date_and_reminder_parse_verbatim(self) -> None:
+        """Present dueDate and a full reminder object both parse onto the item."""
+        payload = [list_item_with_due_date_and_reminder()]
+        result = parse_list_items(payload)
+
+        assert result.skipped == 0
+        item = result.items[0]
+        assert item.due_date == "2026-10-01T09:00:00.000Z"
+        assert item.reminder == ("SNOOZE", "MINUTE", "30")
+
+    def test_f12_absent_due_date_and_reminder_give_none(self) -> None:
+        """An item with neither field defaults to None / None, and is not skipped."""
+        payload = [list_item_without_assignment_fields()]
+        result = parse_list_items(payload)
+
+        assert result.skipped == 0
+        item = result.items[0]
+        assert item.due_date is None
+        assert item.reminder is None
+
+    def test_f12_malformed_due_date_gives_none_not_skipped(self) -> None:
+        """dueDate as a non-string gives None, and the item is not skipped."""
+        payload = [list_item_with_malformed_due_date()]
+        result = parse_list_items(payload)
+
+        assert result.skipped == 0
+        assert len(result.items) == 1
+        assert result.items[0].due_date is None
+
+    def test_f12_malformed_reminder_gives_none_not_skipped(self) -> None:
+        """A reminder object missing a required field gives None, and the item
+        is not skipped."""
+        payload = [list_item_with_malformed_reminder()]
+        result = parse_list_items(payload)
+
+        assert result.skipped == 0
+        assert len(result.items) == 1
+        assert result.items[0].reminder is None

@@ -14,11 +14,13 @@ from familywall_mcp.models import FamilyContext, Principal
 from familywall_mcp.services.principal_context import FixedContextResolver, PrincipalContext
 from familywall_mcp.storage.memory import InMemoryReceiptRepository
 from familywall_mcp.tools.registry import (
+    AddListItemResponse,
     CreateCalendarEventResponse,
     ErrorResponse,
     GetListItemsResponse,
     ListFamilyMembersResponse,
     SetCalendarEventAttendeesResponse,
+    SetListItemAssigneesResponse,
     ToolRegistry,
 )
 
@@ -55,7 +57,7 @@ class FakeSessionPool:
         elif endpoint == "tasklist":
             # Check if this is a lookup by list ID
             list_id = fields.get("a00listId", "")
-            # Return items that were created/moved to this list
+            # Return items that were created/updated in this list
             items = []
             for item_id, item_info in self.created_items.items():
                 if item_info.get("taskListId") == list_id:
@@ -65,6 +67,8 @@ class FakeSessionPool:
                             "text": item_info.get("text", "Item"),
                             "complete": "false",
                             "taskListId": list_id,
+                            "assigneeIds": item_info.get("assigneeIds", []),
+                            "toAll": item_info.get("toAll", "true"),
                         }
                     )
             # Always include at least one item for test compatibility
@@ -91,12 +95,33 @@ class FakeSessionPool:
                 "text": text,
                 "taskListId": "taskList/default",
             }
+        elif endpoint == "taskcreate2":
+            item_id = "task/2"
+            text = fields.get("text", "Item")
+            list_id = fields.get("taskListId", "taskList/default")
+            self.created_items[item_id] = {
+                "text": text,
+                "taskListId": list_id,
+                "assigneeIds": _assignee_ids_from_fields(fields),
+                "toAll": fields.get("toAll", "false"),
+            }
+            return {
+                "metaId": item_id,
+                "text": text,
+                "taskListId": list_id,
+            }
         elif endpoint == "taskmove":
             # Move the item to the target list
             task_id = fields.get("a00taskId", "")
             target_list_id = fields.get("a00taskListId", "")
             if task_id in self.created_items:
                 self.created_items[task_id]["taskListId"] = target_list_id
+            return {"ok": True}
+        elif endpoint == "taskupdate2":
+            task_id = fields.get("taskId", "")
+            if task_id in self.created_items:
+                self.created_items[task_id]["assigneeIds"] = _assignee_ids_from_fields(fields)
+                self.created_items[task_id]["toAll"] = fields.get("toAll", "false")
             return {"ok": True}
         elif endpoint == "taskmark":
             return {"ok": True}
@@ -122,6 +147,16 @@ class FakeSessionPool:
     async def aclose(self) -> None:
         """Close the pool."""
         pass
+
+
+def _assignee_ids_from_fields(fields: dict[str, str]) -> list[str]:
+    """Extract the ordered assignee.N account IDs from a taskcreate2/taskupdate2 form."""
+    ids = []
+    index = 0
+    while f"assignee.{index}" in fields:
+        ids.append(fields[f"assignee.{index}"])
+        index += 1
+    return ids
 
 
 def _stored_event(event_id: str, form: dict[str, str]) -> dict[str, object]:
@@ -442,7 +477,8 @@ async def test_get_week_overview_uses_discovered_timezone_fallback() -> None:
 
 @pytest.mark.asyncio
 async def test_add_list_item_refused_when_writes_disabled() -> None:
-    """Criterion 10: add_list_item refuses with zero recorded pool calls when writes_disabled."""
+    """Criterion 10 / F6: add_list_item refuses with zero recorded pool calls
+    when writes_disabled."""
     config = AppConfig.from_env(
         {
             "FAMILYWALL_LOCAL_SUBJECT": "test-local-user",
@@ -558,7 +594,8 @@ async def test_error_response_is_safe() -> None:
 
 @pytest.mark.asyncio
 async def test_add_list_item_with_idempotency_uses_receipt_repo() -> None:
-    """Criterion 8: add_list_item issues create, move, readback with write mode."""
+    """Criterion 8 / F2: add_list_item issues one taskcreate2 (no taskmove),
+    then a readback, with write mode."""
     config = AppConfig.from_env(
         {
             "FAMILYWALL_LOCAL_SUBJECT": "test-local-user",
@@ -601,20 +638,20 @@ async def test_add_list_item_with_idempotency_uses_receipt_repo() -> None:
     assert result1.family_name == "The Test Family"
     assert result1.outcome == "confirmed"
 
-    # Verify the recorded pool calls for add flow:
+    # Verify the recorded pool calls for the add flow:
     # 1. taskgettasklists for list selection
-    # 2. taskcreate for item creation
-    # 3. taskmove for moving to target list
-    # 4. tasklist for readback
+    # 2. taskcreate2 for item creation, directly in the target list
+    # 3. tasklist for readback
+    # No taskmove is ever sent (ADR 0003 supersedes ADR 0002's create-then-move).
     endpoint_calls = [call[1] for call in pool.calls]
     assert "taskgettasklists" in endpoint_calls
-    assert "taskcreate" in endpoint_calls
-    assert "taskmove" in endpoint_calls
+    assert "taskcreate2" in endpoint_calls
+    assert "taskmove" not in endpoint_calls
     assert "tasklist" in endpoint_calls
 
-    # Verify write mode for create and move
+    # Verify write mode for the create
     for _subject, endpoint, _fields, read_write in pool.calls:
-        if endpoint in ("taskcreate", "taskmove"):
+        if endpoint == "taskcreate2":
             assert read_write == "write", f"{endpoint} should use write mode"
 
     # Verify receipt was stored
@@ -630,6 +667,167 @@ def _writes_config(enabled: bool) -> AppConfig:
             "FAMILYWALL_ENABLE_WRITES": "true" if enabled else "false",
         }
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("discovered", "assigned_to", "expected_code"),
+    [
+        (create_discovered_family(), ["   "], "invalid_member_name"),
+        (create_family_with_ambiguous_members(), ["Jordan"], "ambiguous_member"),
+    ],
+    ids=["invalid_member_name", "ambiguous_member"],
+)
+async def test_f6_add_list_item_ambiguous_or_invalid_name_never_refreshes(
+    discovered: DiscoveredFamily, assigned_to: list[str], expected_code: str
+) -> None:
+    """F6: writes enabled, but an invalid or ambiguous name gives zero calls,
+    without ever calling refresh()."""
+    config = _writes_config(True)
+    pool = FakeSessionPoolWithDiscoveryRefresh(_refreshed_family_payload())
+    principal = Principal(subject="test-subject")
+    family_context = FamilyContext(
+        account_id="acct/1", family_id="family/1", calendar_id="calendar/1"
+    )
+    context = PrincipalContext(
+        family_context=family_context,
+        discovered_family=discovered,
+        authenticated_member_timezone="Australia/Sydney",
+        calendar_service=FakeCalendarService(),  # type: ignore[arg-type]
+    )
+    registry = ToolRegistry(
+        config=config,
+        session_pool=pool,  # type: ignore[arg-type]
+        context_resolver=FixedContextResolver(principal, context, pool),  # type: ignore[arg-type]
+        receipt_repository=InMemoryReceiptRepository(),
+    )
+
+    result = await registry._add_list_item("Bread", assigned_to=assigned_to)
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error_code == expected_code
+    assert pool.calls == []
+    assert pool.discovery_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_f6_add_list_item_unknown_member_refreshes_once() -> None:
+    """F6: an unknown name triggers exactly one discovery refresh, then the
+    second lookup uses the refreshed family."""
+    config = _writes_config(True)
+    discovered = create_discovered_family()
+    pool = FakeSessionPoolWithDiscoveryRefresh(_refreshed_family_payload())
+    principal = Principal(subject="test-subject")
+    family_context = FamilyContext(
+        account_id="acct/1", family_id="family/1", calendar_id="calendar/1"
+    )
+    context = PrincipalContext(
+        family_context=family_context,
+        discovered_family=discovered,
+        authenticated_member_timezone="Australia/Sydney",
+        calendar_service=FakeCalendarService(),  # type: ignore[arg-type]
+    )
+    registry = ToolRegistry(
+        config=config,
+        session_pool=pool,  # type: ignore[arg-type]
+        context_resolver=FixedContextResolver(principal, context, pool),  # type: ignore[arg-type]
+        receipt_repository=InMemoryReceiptRepository(),
+    )
+
+    result = await registry._add_list_item(
+        "Bread", assigned_to=["Jordan"], idempotency_key="op-jordan-list"
+    )
+
+    assert isinstance(result, AddListItemResponse)
+    assert result.assigned_to == ("Jordan Lee",)
+    assert result.assigned_to_everyone is False
+    assert pool.discovery_calls == 1
+    endpoint_calls = [call[1] for call in pool.calls]
+    assert endpoint_calls.count("accgetallfamily") == 1
+    assignee_ids = _assignee_ids_from_fields(
+        next(fields for _, endpoint, fields, _ in pool.calls if endpoint == "taskcreate2")
+    )
+    assert assignee_ids == ["acct/3"]
+
+
+@pytest.mark.asyncio
+async def test_f13_add_list_item_response_names_and_no_account_id_leak() -> None:
+    """F13: add_list_item's response reports names/everyone correctly and never
+    leaks an account ID, for both everyone and named assignment."""
+    registry, _pool = create_registry(_writes_config(True), create_discovered_family())
+
+    everyone_result = await registry._add_list_item(
+        "Milk", list_id="taskList/1", idempotency_key="op-everyone-list"
+    )
+    named_result = await registry._add_list_item(
+        "Bread",
+        list_id="taskList/1",
+        assigned_to=["Test Member"],
+        idempotency_key="op-named-list",
+    )
+
+    assert isinstance(everyone_result, AddListItemResponse)
+    assert everyone_result.assigned_to == ("Test Member", "Other Member")
+    assert everyone_result.assigned_to_everyone is True
+
+    assert isinstance(named_result, AddListItemResponse)
+    assert named_result.assigned_to == ("Test Member",)
+    assert named_result.assigned_to_everyone is False
+
+    for result in (everyone_result, named_result):
+        serialised = result.model_dump_json()
+        assert "acct/1" not in serialised
+        assert "acct/2" not in serialised
+
+
+@pytest.mark.asyncio
+async def test_f13_set_list_item_assignees_response_names_and_no_account_id_leak() -> None:
+    """F13: set_list_item_assignees' response reports names/everyone correctly
+    and never leaks an account ID."""
+    registry, pool = create_registry(_writes_config(True), create_discovered_family())
+    pool.created_items["task/501"] = {"text": "Pack lunch", "taskListId": "taskList/1"}
+
+    result = await registry._set_list_item_assignees(
+        "task/501", assigned_to=["Test Member"], idempotency_key="op-set-assignees"
+    )
+
+    assert isinstance(result, SetListItemAssigneesResponse)
+    assert result.item_id == "task/501"
+    assert result.assigned_to == ("Test Member",)
+    assert result.assigned_to_everyone is False
+
+    serialised = result.model_dump_json()
+    assert "acct/1" not in serialised
+    assert "acct/2" not in serialised
+
+
+@pytest.mark.asyncio
+async def test_set_list_item_assignees_refused_when_writes_disabled() -> None:
+    """set_list_item_assignees refuses with zero recorded pool calls when
+    writes_disabled."""
+    registry, pool = create_registry(_writes_config(False), create_discovered_family())
+
+    result = await registry._set_list_item_assignees("task/1", assigned_to=["Test Member"])
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error_code == "writes_disabled"
+    assert pool.calls == []
+
+
+@pytest.mark.asyncio
+async def test_set_list_item_assignees_foreign_item_refused() -> None:
+    """F8 (tool layer): a foreign item is refused via UnsupportedConfigurationError,
+    surfaced as an ErrorResponse, with no taskupdate2 sent."""
+    registry, pool = create_registry(_writes_config(True), create_discovered_family())
+    # No item "task/999" was ever created/registered in pool.created_items, so
+    # the ownership scan in set_item_assignees will not find it.
+
+    result = await registry._set_list_item_assignees("task/999", assigned_to=["Test Member"])
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error_code == "unsupported_configuration"
+    update_calls = [c for c in pool.calls if c[1] == "taskupdate2"]
+    assert update_calls == []
 
 
 @pytest.mark.asyncio

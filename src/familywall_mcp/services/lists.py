@@ -1,6 +1,6 @@
 """Shopping list selection and mutation service.
 
-Provides three-state mutation tracking and list selection with ambiguity resolution.
+Provides multi-state mutation tracking and list selection with ambiguity resolution.
 """
 
 from __future__ import annotations
@@ -12,7 +12,10 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Literal, Protocol
 
+from pydantic import ValidationError
+
 from familywall_mcp.errors import (
+    AuthenticationError,
     ErrorInfo,
     FamilyWallError,
     InvalidEnvelopeError,
@@ -26,18 +29,29 @@ from familywall_mcp.familywall.lists import (
     ListItem,
     ListType,
     ShoppingList,
-    build_create_item_fields,
+    build_create2_item_fields,
     build_get_list_fields,
     build_get_lists_fields,
     build_mark_item_fields,
-    build_move_item_fields,
+    build_update2_assignees_fields,
     parse_list_items,
     parse_list_summaries,
 )
 from familywall_mcp.models import DomainModel, OperationReceipt, Principal
+from familywall_mcp.services.members import ResolvedAssignment
 
 if TYPE_CHECKING:
     from familywall_mcp.interfaces import ReceiptRepository
+
+_INDETERMINATE_ERRORS = (
+    TransportError,
+    RateLimitedError,
+    InvalidEnvelopeError,
+    MalformedPayloadError,
+)
+"""Errors caught as UNKNOWN: the request may or may not have reached FamilyWall."""
+
+RECEIPT_TTL = timedelta(hours=24)
 
 
 class ListTransport(Protocol):
@@ -64,11 +78,12 @@ class ListTransport(Protocol):
 
 
 class WriteOutcome(StrEnum):
-    """Four-state outcome of a mutation operation."""
+    """Five-state outcome of a mutation operation."""
 
     CONFIRMED = "confirmed"  # upstream acknowledged AND a readback shows it
     ACKNOWLEDGED = "acknowledged"  # upstream said ok, readback did not confirm
-    MISFILED = "misfiled"  # created, but it is in the wrong list
+    MISFILED = "misfiled"  # created, but it is in a list other than the one requested
+    MISMATCHED = "mismatched"  # readback shows the write took effect, but differs
     UNKNOWN = "unknown"  # lost, timed out, or unparseable
 
 
@@ -84,17 +99,27 @@ class AddItemResult(DomainModel):
     """Result of adding an item to a list."""
 
     outcome: WriteOutcome
-    item_id: str | None = None  # populated if confirmed, acknowledged, or misfiled
+    item_id: str | None = None  # populated if confirmed, acknowledged, misfiled or mismatched
     # Populated if and only if outcome is misfiled:
     actual_list_id: str | None = None  # the list it actually landed in
     # Populated if and only if outcome is misfiled:
     requested_list_id: str | None = None  # the list that was requested
+    # Populated if and only if outcome is mismatched:
+    mismatched_fields: tuple[str, ...] = ()
 
 
 class SetItemCheckedResult(DomainModel):
     """Result of marking an item as checked/unchecked."""
 
     outcome: WriteOutcome
+
+
+class SetItemAssigneesResult(DomainModel):
+    """Result of changing who a list item is assigned to."""
+
+    outcome: WriteOutcome
+    # Populated if and only if outcome is mismatched:
+    mismatched_fields: tuple[str, ...] = ()
 
 
 class ListService:
@@ -225,338 +250,325 @@ class ListService:
         principal: Principal,
         list_id: str,
         text: str,
+        assignment: ResolvedAssignment,
         operation_id: str,
         receipt_repository: ReceiptRepository,
         family_id: str,
     ) -> tuple[AddItemResult, tuple[ListItem, ...]]:
-        """Add an item to a list via create-then-move.
+        """Add an item directly to ``list_id`` in one taskcreate2 call.
 
-        Implements receipt-based idempotency for deduplication and crash recovery.
-        Creates in the default list, then moves to the requested list if necessary.
+        Superseded create-then-move (ADR 0002): a single taskcreate2 carries the
+        target list and the assignment (probe A2, ADR 0003). No taskmove is ever
+        sent, so the create-then-move partial-failure state no longer exists;
+        ``misfiled`` remains only as a **detected** outcome, when the create
+        response itself names a list other than the one requested — there is no
+        move to fail and no compensation.
 
-        The operation is non-atomic: if create succeeds but move fails, the item exists
-        in the default list and a MISFILED outcome is returned. No automatic retry or
-        delete is performed. See ADR 0002.
+        ``assignment`` is already resolved (names to account IDs) by the caller;
+        no member name ever reaches this method or the wire, only account IDs.
+        Everyone is sent as ``to_all=True`` plus every member's account ID
+        (extrapolated from the taskupdate2 encoding verified by probe A2, not
+        directly observed on taskcreate2); named members are sent as
+        ``to_all=False`` with just those IDs.
+
+        taskcreate2 is sent at most once and never retried. The outcome is
+        ``confirmed`` only when a readback of the requested list finds the
+        created item with exactly the requested assignment (decision 5:
+        everyone needs ``to_all is True``; named members need
+        ``to_all is False`` and the same account ID set, order-insensitive).
+
+        Receipts carry ``resource_id=list_id`` and ``action="list.add_item"``;
+        the payload hash is computed over the complete taskcreate2 fields, so it
+        naturally covers the assignment too, and a pre-upgrade receipt (the old
+        ``taskcreate`` hash) conflicts rather than replaying — safe, since no
+        duplicate is created. A definite refusal (``UpstreamRejectedError`` or
+        ``AuthenticationError``) is recorded as ``status="rejected"`` with the
+        error's code, message and recovery so a replay raises the same error
+        rather than reporting ``unknown`` (the calendar pattern from slice D).
 
         Args:
             principal: The authenticated subject.
-            list_id: The requested list metaId (taskList/...)
+            list_id: The requested list metaId (taskList/...).
             text: The item text.
+            assignment: The resolved assignment (everyone, or named members).
             operation_id: Operation ID supplied by caller; must not be empty.
             receipt_repository: Repository for receipt tracking and idempotency.
             family_id: Family ID for receipt scoping.
 
         Returns:
-            Tuple of (AddItemResult with outcome, updated items in requested list or empty).
+            Tuple of (AddItemResult with outcome, items in the requested list —
+            populated only when a readback actually ran and returned a list).
 
         Raises:
             FamilyWallError: If operation_id conflicts with existing receipt.
+            UpstreamRejectedError: If FamilyWall refused the create.
+            AuthenticationError: If the session was not accepted for the create.
             ValueError: If operation_id is empty.
         """
         if not operation_id or not operation_id.strip():
             raise ValueError("operation_id must not be empty")
 
-        # Build create fields (text only, no list ID, no quantity)
-        create_fields = build_create_item_fields(text)
-        payload_hash = self._compute_payload_hash(create_fields)
+        fields = build_create2_item_fields(
+            list_id=list_id,
+            text=text,
+            to_all=assignment.to_all,
+            assignee_account_ids=assignment.account_ids,
+        )
+        payload_hash = self._compute_payload_hash(fields)
 
-        # Check receipt repository for existing operation
         existing_receipt = await receipt_repository.get(principal, operation_id)
         if existing_receipt is not None:
-            # A receipt written by a different tool (or reused across tools) never
-            # replays as this one; a migrated "legacy" receipt is accepted either way.
-            if existing_receipt.action not in ("list.add_item", "legacy"):
-                raise FamilyWallError(
-                    ErrorInfo(
-                        code="operation_id_conflict",
-                        message="An operation with this ID already exists with different content.",
-                        recovery="Use a different operation ID for this request.",
-                    )
+            return _replay_add_item(existing_receipt, payload_hash), ()
+
+        async def record(
+            status: Literal["pending", "succeeded", "unknown", "rejected"],
+            upstream_id: str | None = None,
+        ) -> None:
+            await receipt_repository.put(
+                OperationReceipt(
+                    subject=principal.subject,
+                    family_id=family_id,
+                    resource_id=list_id,
+                    action="list.add_item",
+                    operation_id=operation_id,
+                    payload_hash=payload_hash,
+                    status=status,
+                    upstream_id=upstream_id,
+                    expires_at=datetime.now(UTC) + RECEIPT_TTL,
                 )
-            # If status is pending (previous process crashed mid-write), resolve to UNKNOWN
-            if existing_receipt.status == "pending":
-                return (
-                    AddItemResult(outcome=WriteOutcome.UNKNOWN),
-                    (),
-                )
-            # Check if payload matches (for succeeded/unknown receipts)
-            if existing_receipt.payload_hash != payload_hash:
-                # Payload mismatch: caller is reusing operation_id with different content
-                raise FamilyWallError(
-                    ErrorInfo(
-                        code="operation_id_conflict",
-                        message="An operation with this ID already exists with different content.",
-                        recovery="Use a different operation ID for this request.",
-                    )
-                )
-            # Return the stored result from upstream_id (contains outcome as JSON)
-            if existing_receipt.status == "succeeded" and existing_receipt.upstream_id:
-                try:
-                    result_data = json.loads(existing_receipt.upstream_id)
-                    stored_outcome = WriteOutcome(result_data.get("outcome", "acknowledged"))
-                    stored_item_id = result_data.get("item_id")
-                    stored_actual_list_id = result_data.get("actual_list_id")
-                    stored_requested_list_id = result_data.get("requested_list_id")
-                    return (
-                        AddItemResult(
-                            outcome=stored_outcome,
-                            item_id=stored_item_id,
-                            actual_list_id=stored_actual_list_id,
-                            requested_list_id=stored_requested_list_id,
-                        ),
-                        (),
-                    )
-                except (json.JSONDecodeError, ValueError):
-                    pass
-            # Fallback: if status is succeeded, return acknowledged
-            return (
-                AddItemResult(outcome=WriteOutcome.ACKNOWLEDGED),
-                (),
             )
 
-        # New operation; create a pending receipt
-        pending_receipt = OperationReceipt(
-            subject=principal.subject,
-            family_id=family_id,
-            resource_id=list_id,
-            action="list.add_item",
-            operation_id=operation_id,
-            payload_hash=payload_hash,
-            status="pending",
-            upstream_id=None,
-            expires_at=datetime.now(UTC) + timedelta(hours=24),
-        )
-        await receipt_repository.put(pending_receipt)
+        await record("pending")
 
-        # Step 1: Create the item (always in default list)
         try:
-            create_response = await self.transport.call("taskcreate", create_fields)
-        except (TransportError, RateLimitedError, InvalidEnvelopeError, MalformedPayloadError):
-            # Create failed indeterminately. Outcome is unknown.
-            unknown_receipt = OperationReceipt(
-                subject=principal.subject,
-                family_id=family_id,
-                resource_id=list_id,
-                action="list.add_item",
-                operation_id=operation_id,
-                payload_hash=payload_hash,
-                status="unknown",
-                upstream_id=None,
-                expires_at=datetime.now(UTC) + timedelta(hours=24),
+            create_response = await self.transport.call("taskcreate2", fields)
+        except (UpstreamRejectedError, AuthenticationError) as exc:
+            # A definite refusal: nothing was created. Record it as rejected so a
+            # replay of this key raises the same refusal instead of resending.
+            info = exc.info
+            await record(
+                "rejected",
+                json.dumps({"code": info.code, "message": info.message, "recovery": info.recovery}),
             )
-            await receipt_repository.put(unknown_receipt)
-            return (
-                AddItemResult(outcome=WriteOutcome.UNKNOWN),
-                (),
-            )
+            raise
+        except _INDETERMINATE_ERRORS:
+            await record("unknown")
+            return AddItemResult(outcome=WriteOutcome.UNKNOWN), ()
 
-        # Parse create response: expecting a full task object with metaId and taskListId
         if not isinstance(create_response, dict):
-            unknown_receipt = OperationReceipt(
-                subject=principal.subject,
-                family_id=family_id,
-                resource_id=list_id,
-                action="list.add_item",
-                operation_id=operation_id,
-                payload_hash=payload_hash,
-                status="unknown",
-                upstream_id=None,
-                expires_at=datetime.now(UTC) + timedelta(hours=24),
-            )
-            await receipt_repository.put(unknown_receipt)
-            return (
-                AddItemResult(outcome=WriteOutcome.UNKNOWN),
-                (),
-            )
+            await record("unknown")
+            return AddItemResult(outcome=WriteOutcome.UNKNOWN), ()
 
-        # Extract item ID and actual list from response
         created_item_id = create_response.get("metaId") or create_response.get("taskId")
         created_list_id = create_response.get("taskListId")
 
-        if not created_item_id or not created_list_id:
-            unknown_receipt = OperationReceipt(
-                subject=principal.subject,
-                family_id=family_id,
-                resource_id=list_id,
-                action="list.add_item",
-                operation_id=operation_id,
-                payload_hash=payload_hash,
-                status="unknown",
-                upstream_id=None,
-                expires_at=datetime.now(UTC) + timedelta(hours=24),
-            )
-            await receipt_repository.put(unknown_receipt)
-            return (
-                AddItemResult(outcome=WriteOutcome.UNKNOWN),
-                (),
-            )
+        if not created_item_id:
+            await record("unknown")
+            return AddItemResult(outcome=WriteOutcome.UNKNOWN), ()
 
-        # Step 2: Decide if we need to move
-        # If it's already in the requested list, skip the move entirely
-        if created_list_id == list_id:
-            # Item is already in the right list; no move needed
-            result_data = {
-                "outcome": WriteOutcome.CONFIRMED.value,
-                "item_id": created_item_id,
-            }
-            final_receipt = OperationReceipt(
-                subject=principal.subject,
-                family_id=family_id,
-                resource_id=list_id,
-                action="list.add_item",
-                operation_id=operation_id,
-                payload_hash=payload_hash,
-                status="succeeded",
-                upstream_id=json.dumps(result_data),
-                expires_at=datetime.now(UTC) + timedelta(hours=24),
-            )
-            await receipt_repository.put(final_receipt)
+        if not created_list_id:
+            # An ID is present but the response named no list at all.
+            result = AddItemResult(outcome=WriteOutcome.ACKNOWLEDGED, item_id=created_item_id)
+            await record("succeeded", result.model_dump_json())
+            return result, ()
 
-            # Read back to confirm
+        if created_list_id != list_id:
+            # Detected, not caused: no move was sent and none is sent now.
+            result = AddItemResult(
+                outcome=WriteOutcome.MISFILED,
+                item_id=created_item_id,
+                actual_list_id=created_list_id,
+                requested_list_id=list_id,
+            )
+            await record("succeeded", result.model_dump_json())
+            return result, ()
+
+        # Record the acknowledgement before the readback, so a crash replays as
+        # acknowledged rather than unknown.
+        acknowledged = AddItemResult(outcome=WriteOutcome.ACKNOWLEDGED, item_id=created_item_id)
+        await record("succeeded", acknowledged.model_dump_json())
+        result, items = await self._confirm_added(principal, list_id, created_item_id, assignment)
+        await record("succeeded", result.model_dump_json())
+        return result, items
+
+    async def _confirm_added(
+        self,
+        principal: Principal,
+        list_id: str,
+        created_item_id: str,
+        assignment: ResolvedAssignment,
+    ) -> tuple[AddItemResult, tuple[ListItem, ...]]:
+        """Read ``list_id`` back and compare the created item's assignment."""
+        try:
             items = await self.get_list_items(principal, list_id)
-            found = any(item.item_id == created_item_id for item in items)
-            outcome = WriteOutcome.CONFIRMED if found else WriteOutcome.ACKNOWLEDGED
+        except _INDETERMINATE_ERRORS:
+            return AddItemResult(outcome=WriteOutcome.ACKNOWLEDGED, item_id=created_item_id), ()
 
+        found = next((item for item in items if item.item_id == created_item_id), None)
+        if found is None:
+            return AddItemResult(outcome=WriteOutcome.ACKNOWLEDGED, item_id=created_item_id), ()
+
+        if not _assignment_matches(found, assignment):
             return (
                 AddItemResult(
-                    outcome=outcome,
+                    outcome=WriteOutcome.MISMATCHED,
                     item_id=created_item_id,
-                    actual_list_id=None,
-                    requested_list_id=None,
+                    mismatched_fields=("assignees",),
                 ),
                 items,
             )
 
-        # Step 3: Move is needed
-        move_fields = build_move_item_fields(created_item_id, list_id)
+        return AddItemResult(outcome=WriteOutcome.CONFIRMED, item_id=created_item_id), items
+
+    async def set_item_assignees(
+        self,
+        principal: Principal,
+        item_id: str,
+        assignment: ResolvedAssignment,
+        operation_id: str,
+        receipt_repository: ReceiptRepository,
+        family_id: str,
+    ) -> SetItemAssigneesResult:
+        """Change only who ``item_id`` is assigned to, via one partial taskupdate2.
+
+        SECURITY: this first reads every accessible list to verify the item
+        belongs to one of them, exactly as ``set_item_checked`` does. The
+        taskupdate2 endpoint sends no list ID, so server enforcement is
+        impossible; verification MUST happen before sending the request, or a
+        foreign item's assignment could be changed. A foreign item raises
+        ``UnsupportedConfigurationError`` with zero writes and no receipt.
+
+        ``assignment`` is already resolved by the caller; no member name ever
+        reaches this method or the wire. taskupdate2 is sent at most once and
+        never retried. The outcome is ``confirmed`` only when a readback shows
+        the new assignment and nothing else about the item changed (text,
+        description, completed, list, due date and reminder all compared
+        against the item as read immediately before the write); any other
+        difference is ``mismatched``, naming every differing field.
+
+        Receipts carry ``resource_id=item_id`` and ``action="list.set_assignees"``,
+        following the same pending/succeeded/rejected/replay pattern as
+        ``add_item`` (the calendar pattern from slice D).
+
+        Args:
+            principal: The authenticated subject.
+            item_id: The item metaId (task/...).
+            assignment: The resolved assignment (everyone, or named members).
+            operation_id: Operation ID supplied by caller; must not be empty.
+            receipt_repository: Repository for receipt tracking and idempotency.
+            family_id: Family ID for receipt scoping.
+
+        Returns:
+            SetItemAssigneesResult with the outcome.
+
+        Raises:
+            UnsupportedConfigurationError: If the item belongs to an
+                inaccessible list (zero requests sent, no receipt written).
+            FamilyWallError: If operation_id conflicts with existing receipt.
+            UpstreamRejectedError: If FamilyWall refused the update.
+            AuthenticationError: If the session was not accepted for the update.
+            ValueError: If operation_id is empty.
+        """
+        if not operation_id or not operation_id.strip():
+            raise ValueError("operation_id must not be empty")
+
+        fields = build_update2_assignees_fields(
+            item_id=item_id,
+            to_all=assignment.to_all,
+            assignee_account_ids=assignment.account_ids,
+        )
+        payload_hash = self._compute_payload_hash(fields)
+
+        existing_receipt = await receipt_repository.get(principal, operation_id)
+        if existing_receipt is not None:
+            return _replay_set_assignees(existing_receipt, payload_hash)
+
+        # Verify the item belongs to an accessible list BEFORE sending taskupdate2.
+        # This is a security requirement; foreign items must be rejected with zero
+        # requests and zero receipts.
+        item_list_id: str | None = None
+        before: ListItem | None = None
+        accessible = await self.list_accessible_lists(principal)
+        for lst in accessible:
+            items = await self.get_list_items(principal, lst.list_id)
+            for item in items:
+                if item.item_id == item_id:
+                    item_list_id = lst.list_id
+                    before = item
+                    break
+            if item_list_id is not None:
+                break
+
+        if item_list_id is None or before is None:
+            raise UnsupportedConfigurationError()
+
+        async def record(
+            status: Literal["pending", "succeeded", "unknown", "rejected"],
+            upstream_id: str | None = None,
+        ) -> None:
+            await receipt_repository.put(
+                OperationReceipt(
+                    subject=principal.subject,
+                    family_id=family_id,
+                    resource_id=item_id,
+                    action="list.set_assignees",
+                    operation_id=operation_id,
+                    payload_hash=payload_hash,
+                    status=status,
+                    upstream_id=upstream_id,
+                    expires_at=datetime.now(UTC) + RECEIPT_TTL,
+                )
+            )
+
+        await record("pending")
 
         try:
-            await self.transport.call("taskmove", move_fields)
-        except UpstreamRejectedError:
-            # Definite failure: move was rejected by the server
-            # The item is definitely in created_list_id (the default list)
-            result_data = {
-                "outcome": WriteOutcome.MISFILED.value,
-                "item_id": created_item_id,
-                "actual_list_id": created_list_id,
-                "requested_list_id": list_id,
-            }
-            misfiled_receipt = OperationReceipt(
-                subject=principal.subject,
-                family_id=family_id,
-                resource_id=list_id,
-                action="list.add_item",
-                operation_id=operation_id,
-                payload_hash=payload_hash,
-                status="succeeded",
-                upstream_id=json.dumps(result_data),
-                expires_at=datetime.now(UTC) + timedelta(hours=24),
+            await self.transport.call("taskupdate2", fields)
+        except (UpstreamRejectedError, AuthenticationError) as exc:
+            info = exc.info
+            await record(
+                "rejected",
+                json.dumps({"code": info.code, "message": info.message, "recovery": info.recovery}),
             )
-            await receipt_repository.put(misfiled_receipt)
-            return (
-                AddItemResult(
-                    outcome=WriteOutcome.MISFILED,
-                    item_id=created_item_id,
-                    actual_list_id=created_list_id,
-                    requested_list_id=list_id,
-                ),
-                (),
-            )
-        except (TransportError, RateLimitedError, InvalidEnvelopeError, MalformedPayloadError):
-            # Indeterminate failure: we don't know if the move happened
-            # The create definitely happened, so we know the item's id and location
-            # No retry, no delete. Report misfiled.
-            result_data = {
-                "outcome": WriteOutcome.MISFILED.value,
-                "item_id": created_item_id,
-                "actual_list_id": created_list_id,
-                "requested_list_id": list_id,
-            }
-            misfiled_receipt = OperationReceipt(
-                subject=principal.subject,
-                family_id=family_id,
-                resource_id=list_id,
-                action="list.add_item",
-                operation_id=operation_id,
-                payload_hash=payload_hash,
-                status="succeeded",
-                upstream_id=json.dumps(result_data),
-                expires_at=datetime.now(UTC) + timedelta(hours=24),
-            )
-            await receipt_repository.put(misfiled_receipt)
-            return (
-                AddItemResult(
-                    outcome=WriteOutcome.MISFILED,
-                    item_id=created_item_id,
-                    actual_list_id=created_list_id,
-                    requested_list_id=list_id,
-                ),
-                (),
-            )
+            raise
+        except _INDETERMINATE_ERRORS:
+            await record("unknown")
+            return SetItemAssigneesResult(outcome=WriteOutcome.UNKNOWN)
 
-        # Move succeeded. Now try to read back to confirm
+        # Record the acknowledgement before the readback, so a crash replays as
+        # acknowledged rather than unknown.
+        acknowledged = SetItemAssigneesResult(outcome=WriteOutcome.ACKNOWLEDGED)
+        await record("succeeded", acknowledged.model_dump_json())
+        result = await self._confirm_set_assignees(
+            principal, item_list_id, item_id, before, assignment
+        )
+        await record("succeeded", result.model_dump_json())
+        return result
+
+    async def _confirm_set_assignees(
+        self,
+        principal: Principal,
+        list_id: str,
+        item_id: str,
+        before: ListItem,
+        assignment: ResolvedAssignment,
+    ) -> SetItemAssigneesResult:
+        """Read ``list_id`` back and compare the item against ``before`` and ``assignment``."""
         try:
             items = await self.get_list_items(principal, list_id)
-        except (TransportError, RateLimitedError, InvalidEnvelopeError, MalformedPayloadError):
-            # Readback failed; we know the move was sent and no definite rejection occurred
-            # so it may have succeeded. Report as acknowledged.
-            result_data = {
-                "outcome": WriteOutcome.ACKNOWLEDGED.value,
-                "item_id": created_item_id,
-            }
-            final_receipt = OperationReceipt(
-                subject=principal.subject,
-                family_id=family_id,
-                resource_id=list_id,
-                action="list.add_item",
-                operation_id=operation_id,
-                payload_hash=payload_hash,
-                status="succeeded",
-                upstream_id=json.dumps(result_data),
-                expires_at=datetime.now(UTC) + timedelta(hours=24),
+        except _INDETERMINATE_ERRORS:
+            return SetItemAssigneesResult(outcome=WriteOutcome.ACKNOWLEDGED)
+
+        found = next((item for item in items if item.item_id == item_id), None)
+        if found is None:
+            return SetItemAssigneesResult(outcome=WriteOutcome.ACKNOWLEDGED)
+
+        mismatched = _set_assignees_mismatches(found, before, assignment)
+        if mismatched:
+            return SetItemAssigneesResult(
+                outcome=WriteOutcome.MISMATCHED, mismatched_fields=mismatched
             )
-            await receipt_repository.put(final_receipt)
-            return (
-                AddItemResult(
-                    outcome=WriteOutcome.ACKNOWLEDGED,
-                    item_id=created_item_id,
-                    actual_list_id=None,
-                    requested_list_id=None,
-                ),
-                (),
-            )
-
-        # Look for the newly moved item in the target list
-        found = any(item.item_id == created_item_id for item in items)
-        outcome = WriteOutcome.CONFIRMED if found else WriteOutcome.ACKNOWLEDGED
-
-        # Update receipt with final status
-        result_data = {
-            "outcome": outcome.value,
-            "item_id": created_item_id,
-        }
-        final_receipt = OperationReceipt(
-            subject=principal.subject,
-            family_id=family_id,
-            resource_id=list_id,
-            action="list.add_item",
-            operation_id=operation_id,
-            payload_hash=payload_hash,
-            status="succeeded",
-            upstream_id=json.dumps(result_data),
-            expires_at=datetime.now(UTC) + timedelta(hours=24),
-        )
-        await receipt_repository.put(final_receipt)
-
-        return (
-            AddItemResult(
-                outcome=outcome,
-                item_id=created_item_id,
-                actual_list_id=None,
-                requested_list_id=None,
-            ),
-            items,
-        )
+        return SetItemAssigneesResult(outcome=WriteOutcome.CONFIRMED)
 
     async def set_item_checked(
         self,
@@ -707,3 +719,102 @@ class ListService:
         await receipt_repository.put(final_receipt)
 
         return SetItemCheckedResult(outcome=outcome)
+
+
+def _assignment_matches(item: ListItem, assignment: ResolvedAssignment) -> bool:
+    """Decision 5's assignment match rule.
+
+    Everyone means ``item.to_all is True``. Named members means
+    ``item.to_all is False`` and the same account ID set (order-insensitive).
+    """
+    if assignment.to_all:
+        return item.to_all is True
+    return item.to_all is False and set(item.assignee_ids) == set(assignment.account_ids)
+
+
+def _set_assignees_mismatches(
+    found: ListItem, before: ListItem, assignment: ResolvedAssignment
+) -> tuple[str, ...]:
+    """Name every field where the read-back item differs from ``before`` or ``assignment``."""
+    mismatched: list[str] = []
+    if not _assignment_matches(found, assignment):
+        mismatched.append("assignees")
+    if found.text != before.text:
+        mismatched.append("text")
+    if found.description != before.description:
+        mismatched.append("description")
+    if found.completed != before.completed:
+        mismatched.append("completed")
+    if found.list_id != before.list_id:
+        mismatched.append("list_id")
+    if found.due_date != before.due_date:
+        mismatched.append("due_date")
+    if found.reminder != before.reminder:
+        mismatched.append("reminder")
+    return tuple(mismatched)
+
+
+def _conflict_error() -> FamilyWallError:
+    """The stable operation_id_conflict error, shared by both replay helpers."""
+    return FamilyWallError(
+        ErrorInfo(
+            code="operation_id_conflict",
+            message="An operation with this ID already exists with different content.",
+            recovery="Use a different operation ID for this request.",
+        )
+    )
+
+
+def _rebuild_rejection(upstream_id: str | None) -> FamilyWallError:
+    """Rebuild the original refusal from its stored JSON, for a rejected replay.
+
+    Falls back to a plain ``UpstreamRejectedError`` if the JSON is missing or
+    unreadable, so a replay never raises anything but a ``FamilyWallError``.
+    """
+    if upstream_id:
+        try:
+            info = json.loads(upstream_id)
+            return FamilyWallError(
+                ErrorInfo(code=info["code"], message=info["message"], recovery=info["recovery"])
+            )
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass
+    return UpstreamRejectedError()
+
+
+def _replay_add_item(existing: OperationReceipt, payload_hash: str) -> AddItemResult:
+    """Resolve a repeated add_item operation ID from its stored receipt, with no upstream call."""
+    # A receipt written by a different tool (or reused across tools) never replays
+    # as this one; a migrated "legacy" receipt is accepted either way. A
+    # pre-upgrade add_list_item receipt (the old taskcreate hash) falls through
+    # to the payload_hash check below and conflicts, since the fields changed.
+    if existing.action not in ("list.add_item", "legacy"):
+        raise _conflict_error()
+    if existing.payload_hash != payload_hash:
+        raise _conflict_error()
+    if existing.status == "rejected":
+        raise _rebuild_rejection(existing.upstream_id)
+    if existing.status == "succeeded" and existing.upstream_id:
+        try:
+            return AddItemResult.model_validate_json(existing.upstream_id)
+        except ValidationError:
+            return AddItemResult(outcome=WriteOutcome.ACKNOWLEDGED)
+    # pending (a crash mid-write) and unknown both resolve to unknown.
+    return AddItemResult(outcome=WriteOutcome.UNKNOWN)
+
+
+def _replay_set_assignees(existing: OperationReceipt, payload_hash: str) -> SetItemAssigneesResult:
+    """Resolve a repeated set_item_assignees operation ID from its stored receipt."""
+    if existing.action not in ("list.set_assignees", "legacy"):
+        raise _conflict_error()
+    if existing.payload_hash != payload_hash:
+        raise _conflict_error()
+    if existing.status == "rejected":
+        raise _rebuild_rejection(existing.upstream_id)
+    if existing.status == "succeeded" and existing.upstream_id:
+        try:
+            return SetItemAssigneesResult.model_validate_json(existing.upstream_id)
+        except ValidationError:
+            return SetItemAssigneesResult(outcome=WriteOutcome.ACKNOWLEDGED)
+    # pending (a crash mid-write) and unknown both resolve to unknown.
+    return SetItemAssigneesResult(outcome=WriteOutcome.UNKNOWN)

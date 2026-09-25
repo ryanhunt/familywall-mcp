@@ -340,6 +340,45 @@ def list_item_with_malformed_to_all() -> dict[str, object]:
     }
 
 
+def list_item_with_due_date_and_reminder() -> dict[str, object]:
+    """An item with a dueDate and a full reminder object."""
+    return {
+        "metaId": "task/305",
+        "taskListId": "taskList/101",
+        "text": "Book dentist",
+        "complete": "false",
+        "dueDate": "2026-10-01T09:00:00.000Z",
+        "reminder": {
+            "reminderType": "SNOOZE",
+            "reminderUnit": "MINUTE",
+            "reminderValue": "30",
+            "localId": "reminder-9",
+        },
+    }
+
+
+def list_item_with_malformed_due_date() -> dict[str, object]:
+    """An item whose dueDate is not a string."""
+    return {
+        "metaId": "task/306",
+        "taskListId": "taskList/101",
+        "text": "Bad due date",
+        "complete": "false",
+        "dueDate": 12345,
+    }
+
+
+def list_item_with_malformed_reminder() -> dict[str, object]:
+    """An item whose reminder object is missing a required field."""
+    return {
+        "metaId": "task/307",
+        "taskListId": "taskList/101",
+        "text": "Bad reminder",
+        "complete": "false",
+        "reminder": {"reminderType": "SNOOZE"},
+    }
+
+
 def list_items_with_malformed_entry() -> list[dict[str, object]]:
     """Array with one good item, one malformed, two more good items."""
     items = list_items_bare_array()
