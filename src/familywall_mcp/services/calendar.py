@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Literal, Protocol
 from zoneinfo import ZoneInfo, available_timezones
@@ -27,15 +27,20 @@ from familywall_mcp.errors import (
     UpstreamRejectedError,
 )
 from familywall_mcp.familywall.calendar import (
+    DEFAULT_TIMED_REMINDERS,
     AllDaySpan,
     CalendarEvent,
     EventReminder,
+    Reminder,
     TimedSpan,
+    build_create_all_day_event_fields,
     build_create_event_fields,
     build_interval_fields,
     build_update_attendees_fields,
     parse_created_event_id,
+    parse_default_reminder,
     parse_events,
+    typed_reminders,
 )
 from familywall_mcp.models import DomainModel, FamilyContext, OperationReceipt, Principal
 from familywall_mcp.services.members import ResolvedAssignment
@@ -47,12 +52,14 @@ if TYPE_CHECKING:
 MAX_EVENT_DURATION = timedelta(days=14)
 """Longest timed event accepted; it also bounds the readback window."""
 
+MAX_ALL_DAY_DURATION = timedelta(days=28)
+"""Longest all-day event accepted, so its readback stays within one evtlistinterval call."""
+
 READBACK_MARGIN = timedelta(days=1)
 """Readback window padding, wide enough to find an event shifted by a zone error."""
 
 RECEIPT_TTL = timedelta(hours=24)
 
-DEFAULT_REMINDER = (EventReminder(type="SNOOZE", unit="MINUTE", value="30"),)
 """The web app's own default reminder for a timed event (probe A1, 2026-09-25)."""
 
 _INDETERMINATE_ERRORS = (
@@ -175,6 +182,30 @@ class NewTimedEvent(DomainModel):
         return self
 
 
+class NewAllDayEvent(DomainModel):
+    """A validated request for one all-day, non-recurring event."""
+
+    title: str = Field(min_length=1, max_length=200)
+    start_date: date
+    end_date: date
+    """Inclusive last day."""
+    timezone: str
+    location: str | None = Field(default=None, max_length=500)
+    description: str | None = Field(default=None, max_length=4000)
+
+    @model_validator(mode="after")
+    def validate_event(self) -> NewAllDayEvent:
+        if self.timezone not in available_timezones():
+            raise ValueError(f"unknown timezone: {self.timezone}")
+        if self.end_date < self.start_date:
+            raise ValueError("end must not be before start")
+        if self.end_date - self.start_date >= MAX_ALL_DAY_DURATION:
+            raise ValueError(
+                f"all-day events longer than {MAX_ALL_DAY_DURATION.days} days are not supported"
+            )
+        return self
+
+
 class CreateEventResult(DomainModel):
     """Result of creating a calendar event."""
 
@@ -184,6 +215,8 @@ class CreateEventResult(DomainModel):
     mismatched_fields: tuple[str, ...] = ()
     actual_start: str | None = None  # local ISO datetime, or a date for an all-day event
     actual_end: str | None = None
+    reminders: tuple[Reminder, ...] | None = None
+    """The reminders sent, after resolving the member's default; None if not sent."""
 
 
 class SetAttendeesResult(DomainModel):
@@ -324,13 +357,14 @@ class CalendarService:
     async def create_event(
         self,
         principal: Principal,
-        request: NewTimedEvent,
+        request: NewTimedEvent | NewAllDayEvent,
         assignment: ResolvedAssignment,
         operation_id: str,
         receipt_repository: ReceiptRepository,
         family_context: FamilyContext,
+        reminders: tuple[Reminder, ...] | None = None,
     ) -> CreateEventResult:
-        """Create one timed, non-recurring event, assigned per ``assignment``.
+        """Create one timed or all-day, non-recurring event, assigned per ``assignment``.
 
         ``assignment`` is already resolved (names to account IDs) by the
         caller; no member name ever reaches this method or the wire, only
@@ -340,8 +374,13 @@ class CalendarService:
 
         evtcreate is sent at most once and never retried. The outcome is confirmed
         only when a readback finds the created event ID with exactly the requested
-        title, instants, zone, location, description, attendees and reminder in
-        the family calendar.
+        title, instants (or dates), zone, location, description, attendees and
+        reminders in the family calendar.
+
+        Without ``reminders`` the event gets what the FamilyWall apps would give
+        it: the member's own default reminder (``settingsgetperfamily``) for a
+        timed event, a reminder at the start of the day for an all-day one. An
+        empty tuple means no reminder.
 
         Receipts carry ``resource_id=family_context.calendar_id`` and
         ``action="calendar.create_event"``; the payload hash is tagged with the
@@ -359,6 +398,7 @@ class CalendarService:
             operation_id: Operation ID supplied by the caller; must not be empty.
             receipt_repository: Repository for receipt tracking and idempotency.
             family_context: The verified family context of ``principal``.
+            reminders: The reminders to set, or None for the member's default.
 
         Returns:
             CreateEventResult with the outcome.
@@ -373,23 +413,18 @@ class CalendarService:
             raise ValueError("operation_id must not be empty")
 
         tz = ZoneInfo(request.timezone)
-        start = request.start.astimezone(tz)
-        end = request.end.astimezone(tz)
-        fields = build_create_event_fields(
-            title=request.title,
-            start=start,
-            end=end,
-            timezone=request.timezone,
-            to_all=assignment.to_all,
-            attendee_account_ids=assignment.account_ids,
-            location=request.location,
-            description=request.description,
-        )
-        payload_hash = _hash_payload("evtcreate", family_context.calendar_id, fields)
+        # The hash covers the request as asked for ("default" reminders rather
+        # than the resolved setting), so a replay needs no settings read.
+        requested = "default" if reminders is None else ",".join(r.label() for r in reminders)
+        hashed = {**_create_fields(request, assignment, tz, ()), "__reminders__": requested}
+        payload_hash = _hash_payload("evtcreate", family_context.calendar_id, hashed)
 
         existing = await receipt_repository.get(principal, operation_id)
         if existing is not None:
             return _replay_create(existing, payload_hash)
+
+        effective = await self._resolve_reminders(reminders, isinstance(request, NewAllDayEvent))
+        fields = _create_fields(request, assignment, tz, effective)
 
         async def record(
             status: Literal["pending", "succeeded", "unknown", "rejected"],
@@ -431,10 +466,12 @@ class CalendarService:
             raise
         except _INDETERMINATE_ERRORS:
             await record("unknown")
-            return CreateEventResult(outcome=EventWriteOutcome.UNKNOWN)
+            return CreateEventResult(outcome=EventWriteOutcome.UNKNOWN, reminders=effective)
 
         event_id = parse_created_event_id(response)
-        acknowledged = CreateEventResult(outcome=EventWriteOutcome.ACKNOWLEDGED, event_id=event_id)
+        acknowledged = CreateEventResult(
+            outcome=EventWriteOutcome.ACKNOWLEDGED, event_id=event_id, reminders=effective
+        )
         # Record the acknowledgement before the readback, so a crash replays as
         # acknowledged rather than unknown.
         await record("succeeded", acknowledged)
@@ -442,41 +479,74 @@ class CalendarService:
             return acknowledged
 
         result = await self._confirm_created(
-            event_id, request, assignment, start, end, family_context
+            event_id, request, assignment, effective, tz, family_context
         )
         await record("succeeded", result)
         return result
 
+    async def _resolve_reminders(
+        self, requested: tuple[Reminder, ...] | None, all_day: bool
+    ) -> tuple[Reminder, ...]:
+        """The reminders to create an event with.
+
+        Mirrors the FamilyWall apps, where a new event gets its creator's own
+        default (live-verified 2026-09-29: members of one family carry different
+        defaults, e.g. 1 day and 30 minutes). An all-day event gets a reminder at
+        the start of the day. If the member's setting cannot be read, the web
+        app's 30-minute fallback is used.
+        """
+        if requested is not None:
+            return requested
+        if all_day:
+            return (Reminder(unit="MINUTE", value=0),)
+        try:
+            payload = await self.transport.call("settingsgetperfamily", {})
+        except (*_INDETERMINATE_ERRORS, UpstreamRejectedError):
+            return DEFAULT_TIMED_REMINDERS
+        default = parse_default_reminder(payload)
+        return (default,) if default is not None else DEFAULT_TIMED_REMINDERS
+
     async def _confirm_created(
         self,
         event_id: str,
-        request: NewTimedEvent,
+        request: NewTimedEvent | NewAllDayEvent,
         assignment: ResolvedAssignment,
-        start: datetime,
-        end: datetime,
+        reminders: tuple[Reminder, ...],
+        tz: ZoneInfo,
         family_context: FamilyContext,
     ) -> CreateEventResult:
         """Read the created event back and compare it with the request."""
+        if isinstance(request, NewAllDayEvent):
+            window_start = datetime.combine(request.start_date, time(0), tzinfo=tz)
+            window_end = datetime.combine(request.end_date + timedelta(days=1), time(0), tzinfo=tz)
+        else:
+            window_start, window_end = request.start, request.end
         fields = build_interval_fields(
-            family_context.calendar_id, start - READBACK_MARGIN, end + READBACK_MARGIN
+            family_context.calendar_id,
+            window_start - READBACK_MARGIN,
+            window_end + READBACK_MARGIN,
+        )
+        acknowledged = CreateEventResult(
+            outcome=EventWriteOutcome.ACKNOWLEDGED, event_id=event_id, reminders=reminders
         )
         try:
             payload = await self.transport.call("evtlistinterval", fields)
             parsed = parse_events(payload)
         except (*_INDETERMINATE_ERRORS, UpstreamRejectedError, AuthenticationError):
-            return CreateEventResult(outcome=EventWriteOutcome.ACKNOWLEDGED, event_id=event_id)
+            return acknowledged
 
         found = next((e for e in parsed.events if e.occurrence_id == event_id), None)
         if found is None:
-            return CreateEventResult(outcome=EventWriteOutcome.ACKNOWLEDGED, event_id=event_id)
+            return acknowledged
 
         mismatched = _readback_mismatches(
-            found, request, assignment, start, end, family_context.calendar_id
+            found, request, assignment, reminders, family_context.calendar_id
         )
         if not mismatched:
-            return CreateEventResult(outcome=EventWriteOutcome.CONFIRMED, event_id=event_id)
+            return CreateEventResult(
+                outcome=EventWriteOutcome.CONFIRMED, event_id=event_id, reminders=reminders
+            )
 
-        tz = start.tzinfo
         if isinstance(found.span, TimedSpan):
             actual_start = found.span.start.astimezone(tz).isoformat()
             actual_end = found.span.end.astimezone(tz).isoformat()
@@ -489,6 +559,7 @@ class CalendarService:
             mismatched_fields=mismatched,
             actual_start=actual_start,
             actual_end=actual_end,
+            reminders=reminders,
         )
 
     async def set_event_attendees(
@@ -823,24 +894,63 @@ def _rebuild_rejection(upstream_id: str | None) -> FamilyWallError:
     return UpstreamRejectedError()
 
 
+def _create_fields(
+    request: NewTimedEvent | NewAllDayEvent,
+    assignment: ResolvedAssignment,
+    tz: ZoneInfo,
+    reminders: tuple[Reminder, ...],
+) -> dict[str, str]:
+    """The evtcreate form for ``request`` with the given reminders."""
+    if isinstance(request, NewAllDayEvent):
+        return build_create_all_day_event_fields(
+            title=request.title,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            timezone=request.timezone,
+            to_all=assignment.to_all,
+            attendee_account_ids=assignment.account_ids,
+            location=request.location,
+            description=request.description,
+            reminders=reminders,
+        )
+    return build_create_event_fields(
+        title=request.title,
+        start=request.start.astimezone(tz),
+        end=request.end.astimezone(tz),
+        timezone=request.timezone,
+        to_all=assignment.to_all,
+        attendee_account_ids=assignment.account_ids,
+        location=request.location,
+        description=request.description,
+        reminders=reminders,
+    )
+
+
 def _readback_mismatches(
     event: CalendarEvent,
-    request: NewTimedEvent,
+    request: NewTimedEvent | NewAllDayEvent,
     assignment: ResolvedAssignment,
-    start: datetime,
-    end: datetime,
+    reminders: tuple[Reminder, ...],
     calendar_id: str,
 ) -> tuple[str, ...]:
     """Name every field where the read-back event differs from the request."""
     mismatched: list[str] = []
     if event.title != request.title:
         mismatched.append("title")
-    if not isinstance(event.span, TimedSpan):
+    if isinstance(request, NewAllDayEvent):
+        if not isinstance(event.span, AllDaySpan):
+            mismatched.append("all_day")
+        else:
+            if event.span.start_date != request.start_date:
+                mismatched.append("start")
+            if event.span.end_date != request.end_date:
+                mismatched.append("end")
+    elif not isinstance(event.span, TimedSpan):
         mismatched.append("all_day")
     else:
-        if event.span.start != start:
+        if event.span.start != request.start:
             mismatched.append("start")
-        if event.span.end != end:
+        if event.span.end != request.end:
             mismatched.append("end")
     if event.event_timezone != request.timezone:
         mismatched.append("timezone")
@@ -860,9 +970,21 @@ def _readback_mismatches(
         )
     if not attendees_ok:
         mismatched.append("attendees")
-    if event.reminders != DEFAULT_REMINDER:
+    if not _reminders_match(event.reminders, reminders):
         mismatched.append("reminder")
     return tuple(mismatched)
+
+
+def _reminders_match(
+    actual: tuple[EventReminder, ...] | None, expected: tuple[Reminder, ...]
+) -> bool:
+    """Whether an event carries exactly ``expected`` (all SNOOZE), in any order."""
+    if actual is None or len(actual) != len(expected):
+        return False
+    if any(entry.type != "SNOOZE" for entry in actual):
+        return False
+    key = lambda r: (r.unit, r.value)  # noqa: E731
+    return sorted(typed_reminders(actual), key=key) == sorted(expected, key=key)
 
 
 def _assign_timed_event(

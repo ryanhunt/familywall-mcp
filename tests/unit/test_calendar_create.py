@@ -15,6 +15,7 @@ from familywall_mcp.errors import (
     TransportError,
     UpstreamRejectedError,
 )
+from familywall_mcp.familywall.calendar import DEFAULT_TIMED_REMINDERS
 from familywall_mcp.models import FamilyContext, OperationReceipt, Principal
 from familywall_mcp.services.calendar import (
     CalendarService,
@@ -106,6 +107,9 @@ class ScriptedTransport:
     def endpoints(self) -> list[str]:
         return [endpoint for endpoint, _ in self.calls]
 
+    def sent(self, endpoint: str) -> dict[str, str]:
+        return next(fields for name, fields in self.calls if name == endpoint)
+
 
 def created_then_read(*readback: dict[str, object]) -> ScriptedTransport:
     return ScriptedTransport(
@@ -130,6 +134,9 @@ async def create(
         operation_id,
         receipts or InMemoryReceiptRepository(),
         FAMILY,
+        # Explicit, so these tests need no settings read; the member default is
+        # covered in test_calendar_reminders.py.
+        reminders=DEFAULT_TIMED_REMINDERS,
     )
 
 
@@ -595,6 +602,7 @@ class TestReceipts:
             "op-1",
             receipts,
             FAMILY,
+            reminders=DEFAULT_TIMED_REMINDERS,
         )
 
         assert result.outcome is EventWriteOutcome.CONFIRMED
