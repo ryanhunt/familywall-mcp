@@ -271,6 +271,28 @@ confirmation was extended to match: the `attendees` field name covers a
 `reminderList`. This is unit-tested only (synthetic fixtures); the lead's live
 check of both attendee modes is the next step.
 
+**All-day events and the member's own default reminder (live-verified
+2026-09-23 and 2026-09-29).** `create_calendar_event` also creates all-day
+events: `allDay=true` with offset-less `<date>T00:00:00` to
+`<last date>T23:59:59`, stored as the same values with `.000Z` (the read
+encoding). The web app omits `timeZone` here (probe A1); sending it was also
+accepted. Reminders are encoded as `reminderList.<i>.reminderType=SNOOZE`,
+`.reminderUnit` (`MINUTE`/`HOUR`/`DAY`) and `.reminderValue`; an empty list is
+sent as `reminderList=$empty`.
+
+The FamilyWall apps give a new event its **creator's own default**, not a fixed
+30 minutes: in the verified account most timed events by one member carry that
+member's default of 1 day, and nearly all timed events by the other member
+carry 30 minutes. The default is `defaultReminderUnit`/`defaultReminderValue`
+in `settingsgetperfamily`. All-day events mostly get a reminder at the start of
+the day (`0 MINUTE`). Without `reminders`, `create_calendar_event` mirrors
+this: a timed event gets the member's default read live from
+`settingsgetperfamily` (the web app's 30 minutes only if it cannot be read), an
+all-day event `0 MINUTE`. The readback confirmation compares against the
+reminders actually sent, and the response reports them. Live check 2026-10-10:
+timed (member default 1 day) and all-day (`0 MINUTE`) creates both `confirmed`,
+with attendees, then deleted.
+
 ### Probe A1 — the web app's own forms (2026-09-25)
 
 Captured from the FamilyWall web app's `evtcreate`, `evtupdate` and `evtdelete`

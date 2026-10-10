@@ -61,7 +61,7 @@ Ten MCP tools are exposed today:
 | `add_list_item` | write | Add an item to a list, assigned to everyone or to named members in the same call, with an idempotency key so retries don't create duplicates |
 | `set_list_item_checked` | write | Mark a list item checked or unchecked (explicit target state, not a toggle) |
 | `set_list_item_assignees` | write | Change only who an existing list item is assigned to; nothing else about the item changes |
-| `create_calendar_event` | write | Add a timed, one-off event to the family calendar, assigned to everyone or to named members, and confirm it by reading it back |
+| `create_calendar_event` | write | Add a timed or all-day, one-off event to the family calendar, assigned to everyone or to named members, with the member's own default reminder unless reminders are given, and confirm it by reading it back |
 | `set_calendar_event_attendees` | write | Change only who an existing, ordinary, one-off, timed family-calendar event is assigned to, and confirm nothing else about it changed |
 
 A few things worth knowing about how these behave:
@@ -90,19 +90,24 @@ A few things worth knowing about how these behave:
   carries no list ID, so this server enforces that check itself), sends one
   partial update, and confirms by reading the item back: any field other than
   the assignment that changed is reported as `mismatched`, naming it.
-- **`create_calendar_event` is deliberately narrow.** It creates one timed,
-  non-recurring event. `assigned_to` takes member names exactly as
+- **`create_calendar_event` is deliberately narrow.** It creates one timed or
+  all-day, non-recurring event. `assigned_to` takes member names exactly as
   `list_family_members` shows them; omit it, or pass an empty list, to assign
   everyone in the family — that is the default, a change from earlier
   versions that assigned only the signed-in member. An unknown name triggers
-  one refresh of the cached family list before failing. The event gets
-  FamilyWall's own default 30-minute reminder. Times are local to your
-  FamilyWall timezone unless you pass another `timezone` or an explicit offset;
-  a local time skipped or repeated by a daylight-saving change is refused.
-  All-day and recurring events, and deleting events, are not supported yet.
-  The outcome is `confirmed` only when a readback matches the request exactly
-  (including the attendees and the reminder); `mismatched` means the event
-  exists but differs.
+  one refresh of the cached family list before failing. Without `reminders`
+  the event gets what the FamilyWall apps would give it: the creating member's
+  own default reminder (read from their FamilyWall settings; members of one
+  family can differ, e.g. one day versus 30 minutes) for a timed event, and a
+  reminder at the start of the day for an all-day one. `reminders` takes values
+  like `"30 minutes"`, `"2 hours"` or `"1 day"`; an empty list means none.
+  Times are local to your FamilyWall timezone unless you pass another
+  `timezone` or an explicit offset; a local time skipped or repeated by a
+  daylight-saving change is refused. `end` defaults to one hour after `start`;
+  for an all-day event `start` and `end` are dates and `end` is the inclusive
+  last day. Recurring events are not supported. The outcome is `confirmed`
+  only when a readback matches the request exactly (including the attendees
+  and the reminders); `mismatched` means the event exists but differs.
 - **`set_calendar_event_attendees` changes only who a timed, one-off event is
   assigned to.** `event_id` is the `occurrence_id` `get_week_overview` returns,
   and `date` is that event's local date in your FamilyWall timezone.

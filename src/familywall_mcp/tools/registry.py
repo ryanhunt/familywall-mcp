@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import datetime
+import re
 import uuid
-from datetime import date
+from datetime import date, timedelta
 from typing import Literal
 
 from mcp.server import MCPServer
@@ -13,12 +14,12 @@ from pydantic import ValidationError
 
 from familywall_mcp.config import AppConfig
 from familywall_mcp.errors import FamilyWallError
-from familywall_mcp.familywall.calendar import CalendarEvent
+from familywall_mcp.familywall.calendar import CalendarEvent, Reminder
 from familywall_mcp.familywall.discovery import DiscoveredFamily
 from familywall_mcp.familywall.lists import ListItem
 from familywall_mcp.interfaces import ReceiptRepository
 from familywall_mcp.models import DomainModel, Principal
-from familywall_mcp.services.calendar import CalendarService, NewTimedEvent
+from familywall_mcp.services.calendar import CalendarService, NewAllDayEvent, NewTimedEvent
 from familywall_mcp.services.lists import ListService
 from familywall_mcp.services.members import (
     MemberSelectionError,
@@ -153,8 +154,11 @@ class CreateCalendarEventResponse(DomainModel):
     """Display names only, never account IDs; every member's name for everyone."""
     assigned_to_everyone: bool
     timezone: str
-    start: str  # local ISO datetime as requested
-    end: str
+    all_day: bool = False
+    start: str  # local ISO datetime as requested, or a date for an all-day event
+    end: str  # exclusive end; for an all-day event the inclusive last day
+    reminders: tuple[str, ...] | None = None
+    """The reminders sent, after resolving the member's default."""
     # Populated if and only if outcome is mismatched:
     mismatched_fields: tuple[str, ...] = ()
     actual_start: str | None = None  # what the readback shows
@@ -291,16 +295,21 @@ class ToolRegistry:
         server.tool(
             name="create_calendar_event",
             description=(
-                "Create one timed, non-recurring event on the family calendar. "
-                "assigned_to takes member names exactly as list_family_members shows them "
-                "(display or first name); omit it, or pass an empty list, to assign "
-                "everyone in the family. start and end are local times such as "
-                "2026-10-06T10:00 in timezone (default: the member's FamilyWall timezone), "
-                "or RFC 3339 times with an offset. The event gets FamilyWall's default "
-                "30-minute reminder. All-day and recurring events are not supported. "
-                "Outcome is confirmed only when a readback matches the request; mismatched "
-                "means the event exists but differs. Without idempotency_key, retries will "
-                "create duplicate events."
+                "Create one non-recurring event on the family calendar. assigned_to "
+                "takes member names exactly as list_family_members shows them (display "
+                "or first name); omit it, or pass an empty list, to assign everyone in "
+                "the family. Timed event: start and optional end (default: one hour "
+                "later) as local times such as 2026-10-06T10:00 in timezone (default: "
+                "the member's FamilyWall timezone), or RFC 3339 times with an offset. "
+                "All-day event: all_day=true with start and optional inclusive end as "
+                "YYYY-MM-DD. Without reminders the event gets what the FamilyWall apps "
+                "would give it: the member's own default reminder for a timed event, a "
+                "reminder at the start of the day for an all-day one. reminders takes "
+                "values like '30 minutes', '2 hours', '1 day'; an empty list means no "
+                "reminder. Recurring events are not supported. Outcome is confirmed only "
+                "when a readback matches the request; mismatched means the event exists "
+                "but differs. Without idempotency_key, retries will create duplicate "
+                "events."
             ),
             annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
         )(self._create_calendar_event)
@@ -682,22 +691,28 @@ class ToolRegistry:
         self,
         title: str,
         start: str,
-        end: str,
+        end: str | None = None,
+        all_day: bool = False,
         timezone: str | None = None,
         location: str | None = None,
         description: str | None = None,
         assigned_to: list[str] | None = None,
+        reminders: list[str] | None = None,
         idempotency_key: str | None = None,
     ) -> CreateCalendarEventResponse | ErrorResponse:
-        """Create a timed event on the family calendar, assigned per ``assigned_to``.
+        """Create one event on the family calendar, assigned per ``assigned_to``.
 
         If writes are disabled, returns an error response with zero upstream calls.
         Invalid input is rejected before any write.
 
         Args:
             title: The event title.
-            start: Local datetime in ``timezone``, or an RFC 3339 datetime with offset.
-            end: Exclusive end, in the same forms as ``start``.
+            start: Local datetime in ``timezone``, or an RFC 3339 datetime with
+                offset; a ``YYYY-MM-DD`` date when ``all_day``.
+            end: Exclusive end, in the same forms as ``start``; defaults to one
+                hour after ``start``. For an all-day event the inclusive last day,
+                defaulting to ``start``.
+            all_day: Whether this is an all-day event.
             timezone: IANA timezone; defaults to the authenticated member's timezone.
             location: Optional location.
             description: Optional description.
@@ -706,6 +721,8 @@ class ToolRegistry:
                 family discovery before any write; a name unknown to that cache
                 triggers exactly one discovery refresh and a second resolution
                 attempt (never for an ambiguous or otherwise invalid name).
+            reminders: Values like ``"30 minutes"``; ``None`` for the member's
+                default, ``[]`` for none.
             idempotency_key: Optional operation ID for idempotency; generates UUID if not provided.
 
         Returns:
@@ -723,15 +740,33 @@ class ToolRegistry:
             principal, ctx = await self._context_resolver.resolve()
             resolved_timezone = timezone or ctx.authenticated_member_timezone
 
+            request: NewTimedEvent | NewAllDayEvent
             try:
-                request = NewTimedEvent(
-                    title=title,
-                    start=resolve_event_time(start, resolved_timezone),
-                    end=resolve_event_time(end, resolved_timezone),
-                    timezone=resolved_timezone,
-                    location=location,
-                    description=description,
-                )
+                wanted = _parse_reminders(reminders) if reminders is not None else None
+                if all_day:
+                    start_date = _parse_date(start)
+                    request = NewAllDayEvent(
+                        title=title,
+                        start_date=start_date,
+                        end_date=_parse_date(end) if end else start_date,
+                        timezone=resolved_timezone,
+                        location=location,
+                        description=description,
+                    )
+                else:
+                    start_at = resolve_event_time(start, resolved_timezone)
+                    request = NewTimedEvent(
+                        title=title,
+                        start=start_at,
+                        end=(
+                            resolve_event_time(end, resolved_timezone)
+                            if end
+                            else start_at + timedelta(hours=1)
+                        ),
+                        timezone=resolved_timezone,
+                        location=location,
+                        description=description,
+                    )
             except ValidationError as exc:
                 return _invalid_event("; ".join(error["msg"] for error in exc.errors()))
             except ValueError as exc:
@@ -752,8 +787,13 @@ class ToolRegistry:
                 operation_id,
                 self._receipt_repository,
                 ctx.family_context,
+                reminders=wanted,
             )
 
+            if isinstance(request, NewAllDayEvent):
+                start_view, end_view = request.start_date.isoformat(), request.end_date.isoformat()
+            else:
+                start_view, end_view = request.start.isoformat(), request.end.isoformat()
             return CreateCalendarEventResponse(
                 family_name=ctx.discovered_family.name,
                 outcome=result.outcome.value,
@@ -761,8 +801,14 @@ class ToolRegistry:
                 assigned_to=assignment.display_names,
                 assigned_to_everyone=assignment.to_all,
                 timezone=request.timezone,
-                start=request.start.isoformat(),
-                end=request.end.isoformat(),
+                all_day=all_day,
+                start=start_view,
+                end=end_view,
+                reminders=(
+                    tuple(r.label() for r in result.reminders)
+                    if result.reminders is not None
+                    else None
+                ),
                 mismatched_fields=result.mismatched_fields,
                 actual_start=result.actual_start,
                 actual_end=result.actual_end,
@@ -894,6 +940,45 @@ class ToolRegistry:
             principal, ctx = await self._context_resolver.refresh()
             assignment = resolve_members(assigned_to, ctx.discovered_family)
         return principal, ctx, assignment
+
+
+def _parse_date(value: str) -> date:
+    """Parse a bare 'YYYY-MM-DD' date."""
+    if "T" in value:
+        raise ValueError(f"Expected a date without a time, got {value!r}.")
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"Expected a 'YYYY-MM-DD' date, got {value!r}.") from exc
+
+
+_REMINDER_UNITS = {
+    "minute": "MINUTE",
+    "minutes": "MINUTE",
+    "min": "MINUTE",
+    "m": "MINUTE",
+    "hour": "HOUR",
+    "hours": "HOUR",
+    "h": "HOUR",
+    "day": "DAY",
+    "days": "DAY",
+    "d": "DAY",
+}
+_REMINDER = re.compile(r"^\s*(\d+)\s*([a-z]+)\s*$", re.IGNORECASE)
+
+
+def _parse_reminders(values: list[str]) -> tuple[Reminder, ...]:
+    """Parse reminders like '30 minutes', '2 h' or '1 day'."""
+    parsed: list[Reminder] = []
+    for value in values:
+        match = _REMINDER.match(value)
+        unit = _REMINDER_UNITS.get(match.group(2).lower()) if match else None
+        if match is None or unit is None:
+            raise ValueError(
+                f"Expected a reminder like '30 minutes', '2 hours' or '1 day', got {value!r}."
+            )
+        parsed.append(Reminder(unit=unit, value=int(match.group(1))))  # type: ignore[arg-type]
+    return tuple(parsed)
 
 
 def _invalid_event(detail: str) -> ErrorResponse:

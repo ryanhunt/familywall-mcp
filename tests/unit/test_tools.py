@@ -163,8 +163,24 @@ def _stored_event(event_id: str, form: dict[str, str]) -> dict[str, object]:
     """How an evtcreate form reads back: instants re-stamped in UTC, and the
     attendee/reminder fields mirrored back exactly as sent."""
 
+    all_day = form.get("allDay", "false") == "true"
+
     def utc(value: str) -> str:
+        if all_day:  # all-day bounds are offset-less and read back verbatim
+            return f"{value}.000Z"
         return datetime.fromisoformat(value).astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    reminders = []
+    while f"reminderList.{len(reminders)}.reminderType" in form:
+        prefix = f"reminderList.{len(reminders)}."
+        reminders.append(
+            {
+                "localId": f"reminder-{len(reminders) + 1}",
+                "reminderType": form[prefix + "reminderType"],
+                "reminderUnit": form[prefix + "reminderUnit"],
+                "reminderValue": form[prefix + "reminderValue"],
+            }
+        )
 
     attendee_ids = []
     index = 0
@@ -179,7 +195,7 @@ def _stored_event(event_id: str, form: dict[str, str]) -> dict[str, object]:
         "text": form["text"],
         "startDate": utc(form["startDate"]),
         "endDate": utc(form["endDate"]),
-        "allDay": "false",
+        "allDay": "true" if all_day else "false",
         "timeZone": form["timeZone"],
         "recurrency": form["recurrency"],
         "eventType": "UNKNOWN",
@@ -189,14 +205,7 @@ def _stored_event(event_id: str, form: dict[str, str]) -> dict[str, object]:
         "attendeeIds": [] if form["isToAll"] == "true" else attendee_ids,
         "toAll": form["isToAll"],
         "editable": "true",
-        "reminderList": [
-            {
-                "localId": "reminder-1",
-                "reminderType": form["reminderList.0.reminderType"],
-                "reminderUnit": form["reminderList.0.reminderUnit"],
-                "reminderValue": form["reminderList.0.reminderValue"],
-            }
-        ],
+        "reminderList": reminders,
     }
 
 
@@ -669,6 +678,11 @@ def _writes_config(enabled: bool) -> AppConfig:
     )
 
 
+def _sent(pool: FakeSessionPool, endpoint: str) -> dict[str, str]:
+    """The fields of the first call to ``endpoint``."""
+    return next(call[2] for call in pool.calls if call[1] == endpoint)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("discovered", "assigned_to", "expected_code"),
@@ -868,10 +882,11 @@ async def test_c15_create_calendar_event_defaults_to_everyone() -> None:
     assert result.start == "2026-10-06T10:00:00+11:00"
     assert result.end == "2026-10-06T11:00:00+11:00"
     assert [(call[1], call[3]) for call in pool.calls] == [
+        ("settingsgetperfamily", "write"),  # the member's default reminder
         ("evtcreate", "write"),
         ("evtlistinterval", "write"),
     ]
-    form = pool.calls[0][2]
+    form = _sent(pool, "evtcreate")
     assert form["isToAll"] == "true"
     assert form["attendee.0.accountId"] == "acct/1"
     assert form["attendee.1.accountId"] == "acct/2"
@@ -898,7 +913,7 @@ async def test_c15_naming_only_the_signed_in_member_sends_the_single_attendee_fo
     assert result.assigned_to == ("Test Member",)
     assert result.assigned_to_everyone is False
 
-    form = pool.calls[0][2]
+    form = _sent(pool, "evtcreate")
     assert form["isToAll"] == "false"
     assert form["attendee.0.accountId"] == "acct/1"
     assert not any(key.startswith("attendee.1") for key in form)
@@ -914,8 +929,8 @@ async def test_create_calendar_event_honours_an_explicit_timezone() -> None:
 
     assert isinstance(result, CreateCalendarEventResponse)
     assert result.outcome == "confirmed"
-    assert pool.calls[0][2]["startDate"] == "2026-10-06T10:00:00+01:00"
-    assert pool.calls[0][2]["timeZone"] == "Europe/London"
+    assert _sent(pool, "evtcreate")["startDate"] == "2026-10-06T10:00:00+01:00"
+    assert _sent(pool, "evtcreate")["timeZone"] == "Europe/London"
 
 
 @pytest.mark.asyncio
@@ -1121,7 +1136,7 @@ async def test_create_calendar_event_reports_a_refused_create() -> None:
 
     assert isinstance(result, ErrorResponse)
     assert result.error_code == "upstream_rejected"
-    assert [call[1] for call in pool.calls] == ["evtcreate"]
+    assert [call[1] for call in pool.calls if call[1] != "settingsgetperfamily"] == ["evtcreate"]
 
 
 @pytest.mark.asyncio
@@ -1137,7 +1152,7 @@ async def test_create_calendar_event_is_registered_as_a_write_tool() -> None:
     tool = tools["create_calendar_event"]
     assert tool.annotations is not None
     assert tool.annotations.read_only_hint is False
-    assert tool.input_schema["required"] == ["title", "start", "end"]
+    assert tool.input_schema["required"] == ["title", "start"]
 
 
 @pytest.mark.asyncio
@@ -1475,3 +1490,108 @@ async def test_t18_get_list_items_maps_assignment_to_names_and_counts_unresolved
     serialised = result.model_dump_json()
     assert "acct/1" not in serialised
     assert "acct/unknown" not in serialised
+
+
+@pytest.mark.asyncio
+async def test_create_calendar_event_all_day_with_attendees_and_reminders() -> None:
+    """An all-day event carries the attendee form and the requested reminders,
+    and is confirmed by a readback of its dates."""
+    registry, pool = create_registry(_writes_config(True), create_discovered_family())
+
+    result = await registry._create_calendar_event(
+        "Kita geschlossen",
+        "2026-10-06",
+        "2026-10-07",
+        all_day=True,
+        assigned_to=["Test Member"],
+        reminders=["2 hours"],
+    )
+
+    assert isinstance(result, CreateCalendarEventResponse)
+    assert result.outcome == "confirmed"
+    assert result.all_day is True
+    assert (result.start, result.end) == ("2026-10-06", "2026-10-07")
+    assert result.reminders == ("2 HOUR",)
+    assert "settingsgetperfamily" not in [call[1] for call in pool.calls]
+    form = _sent(pool, "evtcreate")
+    assert form["allDay"] == "true"
+    assert form["startDate"] == "2026-10-06T00:00:00"
+    assert form["endDate"] == "2026-10-07T23:59:59"
+    assert form["isToAll"] == "false"
+    assert form["reminderList.0.reminderUnit"] == "HOUR"
+
+
+@pytest.mark.asyncio
+async def test_create_calendar_event_uses_the_members_default_reminder() -> None:
+    class SettingsPool(FakeSessionPool):
+        async def call(
+            self, principal: Principal, endpoint: str, fields: dict[str, str], read_write: str
+        ) -> object:
+            if endpoint == "settingsgetperfamily":
+                self.calls.append((principal.subject, endpoint, fields, read_write))
+                return {"defaultReminderUnit": "DAY", "defaultReminderValue": "1"}
+            return await super().call(principal, endpoint, fields, read_write)
+
+    registry, _ = create_registry(_writes_config(True), create_discovered_family())
+    pool = SettingsPool()
+    registry._session_pool = pool  # type: ignore[assignment]
+
+    result = await registry._create_calendar_event("Dentist", "2026-10-06T10:00")
+
+    assert isinstance(result, CreateCalendarEventResponse)
+    assert result.outcome == "confirmed"
+    assert result.end == "2026-10-06T11:00:00+11:00"  # one hour by default
+    assert result.reminders == ("1 DAY",)
+    assert _sent(pool, "evtcreate")["reminderList.0.reminderUnit"] == "DAY"
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "all_day"),
+    [
+        ("not-a-date", None, False),
+        ("2026-09-25", None, False),  # timed event needs a time
+        ("2026-09-25T14:00", None, True),  # all-day event takes a bare date
+        ("2026-09-25T14:00", "2026-09-25", False),
+    ],
+)
+async def test_create_calendar_event_rejects_bad_times_with_zero_calls(
+    start: str, end: str | None, all_day: bool
+) -> None:
+    registry, pool = create_registry(_writes_config(True), create_discovered_family())
+
+    result = await registry._create_calendar_event("X", start, end=end, all_day=all_day)
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error_code == "invalid_event"
+    assert pool.calls == []
+
+
+def test_parse_reminders_accepts_common_spellings() -> None:
+    from familywall_mcp.familywall.calendar import Reminder
+    from familywall_mcp.tools.registry import _parse_reminders
+
+    assert _parse_reminders(["30 MINUTE", "2 hours", "1 day", "0 minutes"]) == (
+        Reminder(unit="MINUTE", value=30),
+        Reminder(unit="HOUR", value=2),
+        Reminder(unit="DAY", value=1),
+        Reminder(unit="MINUTE", value=0),
+    )
+    assert _parse_reminders([]) == ()
+
+
+@pytest.mark.parametrize("bad", ["soon", "1 week", "-5 minutes", "minutes 30", ""])
+def test_parse_reminders_rejects_unknown_forms(bad: str) -> None:
+    from familywall_mcp.tools.registry import _parse_reminders
+
+    with pytest.raises(ValueError):
+        _parse_reminders([bad])
+
+
+async def test_create_calendar_event_rejects_bad_reminder_with_zero_calls() -> None:
+    registry, pool = create_registry(_writes_config(True), create_discovered_family())
+
+    result = await registry._create_calendar_event("X", "2026-10-01T14:00", reminders=["bald"])
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error_code == "invalid_event"
+    assert pool.calls == []

@@ -14,7 +14,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import Field
 
 from familywall_mcp.errors import MalformedPayloadError
 from familywall_mcp.familywall.wire import coerce_bool
@@ -52,6 +54,38 @@ class EventReminder(DomainModel):
 
     value: str
     """Verbatim ``reminderValue`` (e.g. ``"30"``)."""
+
+
+class Reminder(DomainModel):
+    """A notification before an event: `value` `unit`s ahead of its start.
+
+    Every reminder seen in the verified account has reminderType SNOOZE, so that
+    is the only type this client sends.
+    """
+
+    unit: Literal["MINUTE", "HOUR", "DAY"]
+    value: int = Field(ge=0, le=100_000)
+
+    def label(self) -> str:
+        return f"{self.value} {self.unit}"
+
+
+DEFAULT_TIMED_REMINDERS: tuple[Reminder, ...] = (Reminder(unit="MINUTE", value=30),)
+"""The web app's fallback for a timed event when no member default is known."""
+
+
+def typed_reminders(reminders: tuple[EventReminder, ...] | None) -> tuple[Reminder, ...]:
+    """The reminders of an event that this client understands, in order.
+
+    Entries with an unknown unit or a non-numeric value are skipped.
+    """
+    parsed: list[Reminder] = []
+    for entry in reminders or ():
+        try:
+            parsed.append(Reminder.model_validate({"unit": entry.unit, "value": int(entry.value)}))
+        except (TypeError, ValueError):
+            continue
+    return tuple(parsed)
 
 
 class CalendarEvent(DomainModel):
@@ -414,6 +448,27 @@ def build_interval_fields(
     }
 
 
+def _attendee_fields(to_all: bool, attendee_account_ids: Sequence[str]) -> dict[str, str]:
+    """``isToAll`` plus one ``attendee.N.accountId`` per ID, as probe A1 verified."""
+    if not attendee_account_ids:
+        raise ValueError("attendee_account_ids must not be empty")
+    fields = {"isToAll": "true" if to_all else "false"}
+    for index, account_id in enumerate(attendee_account_ids):
+        fields[f"attendee.{index}.accountId"] = account_id
+    return fields
+
+
+_NON_RECURRING = {
+    "picture": "$empty",
+    "private": "",
+    "recurrency": "NONE",
+    "recurrencyInterval": "1",
+    "byDay": "",
+    "byMonthDay": "",
+    "recurrencyEndDate": "$empty",
+}
+
+
 def build_create_event_fields(
     *,
     title: str,
@@ -424,6 +479,7 @@ def build_create_event_fields(
     attendee_account_ids: Sequence[str],
     location: str | None = None,
     description: str | None = None,
+    reminders: tuple[Reminder, ...] = DEFAULT_TIMED_REMINDERS,
 ) -> dict[str, str]:
     """Build form fields for an evtcreate request: one timed, non-recurring event.
 
@@ -433,8 +489,8 @@ def build_create_event_fields(
     ``docs/contracts/calendar.md#mutations``): everyone is ``isToAll=true``
     **plus** an ``attendee.N.accountId`` for every member (not ``isToAll=true``
     alone); named members are ``isToAll=false`` with ``attendee.0..N-1``, in
-    the given order. The default reminder (``SNOOZE``/``MINUTE``/``30``, the
-    web app's own default) replaces the previous ``reminderList=$empty``.
+    the given order. ``reminders`` replaces the event's whole reminder list, and
+    an empty tuple sends ``reminderList=$empty`` (live-verified 2026-09-29).
     ``color`` is omitted rather than invented.
 
     This function only ever receives resolved account IDs, never member
@@ -457,6 +513,7 @@ def build_create_event_fields(
             empty, even for ``to_all=True``.
         location: Optional location.
         description: Optional description.
+        reminders: The event's reminders; defaults to the web app's 30 minutes.
 
     Returns:
         The complete evtcreate form fields.
@@ -466,8 +523,6 @@ def build_create_event_fields(
     """
     if start.tzinfo is None or end.tzinfo is None:
         raise ValueError("event start and end must be timezone-aware")
-    if not attendee_account_ids:
-        raise ValueError("attendee_account_ids must not be empty")
 
     fields: dict[str, str] = {
         "partnerScope": "Family",
@@ -477,24 +532,53 @@ def build_create_event_fields(
         "timeZone": timezone,
         "where": location or "",
         "description": description or "",
-        "isToAll": "true" if to_all else "false",
     }
-    for index, account_id in enumerate(attendee_account_ids):
-        fields[f"attendee.{index}.accountId"] = account_id
-    fields.update(
-        {
-            "picture": "$empty",
-            "private": "",
-            "recurrency": "NONE",
-            "recurrencyInterval": "1",
-            "byDay": "",
-            "byMonthDay": "",
-            "recurrencyEndDate": "$empty",
-            "reminderList.0.reminderType": "SNOOZE",
-            "reminderList.0.reminderUnit": "MINUTE",
-            "reminderList.0.reminderValue": "30",
-        }
-    )
+    fields.update(_attendee_fields(to_all, attendee_account_ids))
+    fields.update(_NON_RECURRING)
+    fields.update(reminder_fields(reminders))
+    return fields
+
+
+def build_create_all_day_event_fields(
+    *,
+    title: str,
+    start_date: date,
+    end_date: date,
+    timezone: str,
+    to_all: bool,
+    attendee_account_ids: Sequence[str],
+    location: str | None = None,
+    description: str | None = None,
+    reminders: tuple[Reminder, ...] = (),
+) -> dict[str, str]:
+    """Build form fields for an evtcreate request: one all-day, non-recurring event.
+
+    Uses the encoding the server returns for all-day events: ``allDay=true`` and
+    offset-less midnight on the first day to 23:59:59 on the last, so
+    ``end_date`` is inclusive (live-verified 2026-09-23). Attendees and
+    reminders are encoded as for ``build_create_event_fields``.
+
+    Raises:
+        ValueError: If ``end_date`` is before ``start_date``, or
+            ``attendee_account_ids`` is empty.
+    """
+    if end_date < start_date:
+        raise ValueError("end_date must not be before start_date")
+
+    start_wire, end_wire = all_day_wire_bounds(start_date, end_date)
+    fields: dict[str, str] = {
+        "partnerScope": "Family",
+        "text": title,
+        "allDay": "true",
+        "startDate": start_wire,
+        "endDate": end_wire,
+        "timeZone": timezone,
+        "where": location or "",
+        "description": description or "",
+    }
+    fields.update(_attendee_fields(to_all, attendee_account_ids))
+    fields.update(_NON_RECURRING)
+    fields.update(reminder_fields(reminders))
     return fields
 
 
@@ -539,18 +623,13 @@ def build_update_attendees_fields(
     Raises:
         ValueError: If ``attendee_account_ids`` is empty.
     """
-    if not attendee_account_ids:
-        raise ValueError("attendee_account_ids must not be empty")
-
     fields: dict[str, str] = {
         "partnerScope": "Family",
         "option": "All",
         "calendarId": calendar_id,
         "metaId": event_id,
-        "isToAll": "true" if to_all else "false",
     }
-    for index, account_id in enumerate(attendee_account_ids):
-        fields[f"attendee.{index}.accountId"] = account_id
+    fields.update(_attendee_fields(to_all, attendee_account_ids))
     return fields
 
 
@@ -574,3 +653,46 @@ def parse_created_event_id(payload: object) -> str | None:
         if isinstance(value, str) and value.strip():
             return value
     return None
+
+
+def all_day_wire_bounds(start_date: date, end_date: date) -> tuple[str, str]:
+    """The midnight-to-23:59:59 bounds for an all-day span; `end_date` is inclusive."""
+    return f"{start_date.isoformat()}T00:00:00", f"{end_date.isoformat()}T23:59:59"
+
+
+def reminder_fields(reminders: tuple[Reminder, ...]) -> dict[str, str]:
+    """Encode reminders as the web app's serialiser flattens them.
+
+    A reminder list sent to evtcreate or evtupdate replaces the event's whole
+    list, and "$empty" clears it (live evidence, 2026-09-29).
+    """
+    if not reminders:
+        return {"reminderList": "$empty"}
+    fields: dict[str, str] = {}
+    for index, reminder in enumerate(reminders):
+        prefix = f"reminderList.{index}."
+        fields[prefix + "reminderType"] = "SNOOZE"
+        fields[prefix + "reminderUnit"] = reminder.unit
+        fields[prefix + "reminderValue"] = str(reminder.value)
+    return fields
+
+
+def parse_default_reminder(payload: object) -> Reminder | None:
+    """The member's default reminder from settingsgetperfamily, if it has one.
+
+    The FamilyWall apps give a new timed event its creator's default reminder;
+    this is that setting (defaultReminderUnit / defaultReminderValue).
+    """
+    if isinstance(payload, list):
+        payload = payload[0] if payload else None
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("defaultReminderValue")
+    if not isinstance(value, (str, int)):
+        return None
+    try:
+        return Reminder.model_validate(
+            {"unit": payload.get("defaultReminderUnit"), "value": int(value)}
+        )
+    except (TypeError, ValueError):
+        return None
