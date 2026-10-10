@@ -638,6 +638,10 @@ class ListService:
                         recovery="Use a different operation ID for this request.",
                     )
                 )
+            # An unknown outcome was never established; replaying it must not
+            # report success, and must not resend.
+            if existing_receipt.status == "unknown":
+                return SetItemCheckedResult(outcome=WriteOutcome.UNKNOWN)
             # Return the stored result from upstream_id
             if existing_receipt.status == "succeeded" and existing_receipt.upstream_id:
                 try:

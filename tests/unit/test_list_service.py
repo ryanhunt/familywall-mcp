@@ -1000,6 +1000,54 @@ class TestListServiceMutation:
         # Zero requests sent on replay
         assert len(transport.calls) == 0
 
+    async def test_set_item_checked_replay_after_lost_mark_stays_unknown(
+        self, principal: Principal
+    ) -> None:
+        """A taskmark lost in transit is recorded as unknown; replaying the same
+        operation_id must report unknown again, never confirmed, and send nothing."""
+        repo = InMemoryReceiptRepository()
+
+        class FailingTransport(FakeTransport):
+            async def call(self, endpoint: str, fields: dict[str, str]) -> object:
+                if endpoint == "taskmark":
+                    self.calls.append((endpoint, dict(fields)))
+                    raise TransportError()
+                return await super().call(endpoint, fields)
+
+        failing = FailingTransport()
+        failing.set_response(
+            "taskgettasklists",
+            "",
+            {"taskLists": [{"metaId": "taskList/1", "name": "L", "taskListType": "SHOPPING_LIST"}]},
+        )
+        failing.set_response(
+            "tasklist",
+            "taskList/1",
+            {
+                "listItems": [
+                    {
+                        "metaId": "task/123",
+                        "taskListId": "taskList/1",
+                        "text": "bread",
+                        "complete": "false",
+                    }
+                ]
+            },
+        )
+        failing_service = ListService(failing)
+
+        result1 = await failing_service.set_item_checked(
+            principal, "task/123", True, "op1", repo, "fam1"
+        )
+        assert result1.outcome == WriteOutcome.UNKNOWN
+        failing.calls.clear()
+
+        result2 = await failing_service.set_item_checked(
+            principal, "task/123", True, "op1", repo, "fam1"
+        )
+        assert result2.outcome == WriteOutcome.UNKNOWN  # was confirmed
+        assert len(failing.calls) == 0
+
     async def test_set_item_checked_completed_same_state_repeatable(
         self, service: ListService, transport: FakeTransport, principal: Principal
     ) -> None:
