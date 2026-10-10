@@ -1475,3 +1475,21 @@ async def test_t18_get_list_items_maps_assignment_to_names_and_counts_unresolved
     serialised = result.model_dump_json()
     assert "acct/1" not in serialised
     assert "acct/unknown" not in serialised
+
+
+@pytest.mark.parametrize(
+    ("method", "args"),
+    [
+        ("_update_list_item", ("task/1", "Neu")),
+        ("_delete_list_item", ("task/1", "Milch")),
+        ("_delete_list", ("taskList/9", "Camping trip (1)")),
+    ],
+)
+async def test_list_edit_tools_refused_when_writes_disabled(method: str, args: tuple) -> None:
+    registry, pool = create_registry(_writes_config(False), create_discovered_family())
+
+    result = await getattr(registry, method)(*args)
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error_code == "writes_disabled"
+    assert pool.calls == []

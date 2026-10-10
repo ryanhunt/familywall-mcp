@@ -70,20 +70,27 @@ class ResponseEnvelope(DomainModel):
         return self
 
 
+ReceiptAction = Literal[
+    "list.add_item",
+    "list.set_checked",
+    "list.set_assignees",
+    "list.update_item",
+    "list.delete_item",
+    "list.delete_list",
+    "calendar.create_event",
+    "calendar.set_attendees",
+    "legacy",
+]
+"""Which tool wrote a receipt; a key never replays across actions."""
+
+
 class OperationReceipt(DomainModel):
     """A local mutation receipt, with no promise of remote exactly-once delivery."""
 
     subject: str = Field(min_length=1)
     family_id: str = Field(min_length=1)
     resource_id: str = Field(min_length=1)
-    action: Literal[
-        "list.add_item",
-        "list.set_checked",
-        "list.set_assignees",
-        "calendar.create_event",
-        "calendar.set_attendees",
-        "legacy",
-    ]
+    action: ReceiptAction
     operation_id: str = Field(min_length=1, max_length=200)
     payload_hash: str = Field(min_length=1, max_length=128)
     status: Literal["pending", "succeeded", "unknown", "rejected"]

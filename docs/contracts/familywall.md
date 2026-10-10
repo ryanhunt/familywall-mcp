@@ -357,6 +357,40 @@ is live-verified as a patch (see
 [Probe A2](#probe-a2--list-assignment-and-the-2-endpoints-2026-09-25)).
 Cleanup of test items no longer requires the FamilyWall UI.
 
+### Item edit, item delete and list delete — live-verified 2026-09-29
+
+Exercised end to end through the MCP tools inside a throwaway test list that was
+created, filled and then deleted by the test itself; no real list was touched.
+
+| Operation | Request | Evidence |
+| --- | --- | --- |
+| Edit item text | `taskupdate2`: `taskId`, `text` | **Partial.** A text-only update of a checked item with a description and due date left completion, description, due date and list untouched. The web app edits through `taskupdate2`; `taskupdate` stays unexercised |
+| Delete item | `taskdelete`: `a00taskId` | Returns `"true"`; the item is absent from a re-read. The web app itself deletes items through the generic `metadelete`, which deletes any object by id; `taskdelete` is used here because it can only delete list items |
+| Delete list | `taskdeletelist`: `a00id` | Returns `"true"`; the list and its items are absent from a re-read |
+| Create list | `taskcreatelist`: `a00name`, `a00taskListType=TODOS` | Returns the new list object with its `metaId` (used by the tests only; no tool) |
+| Create item in a list | `taskcreate2`: `text`, `taskListId`, optional `description`, `dueDate` | Creates directly in the given list (used by the tests only) |
+
+**Confirmation design.** Because deletion has no undo, `delete_list_item` and
+`delete_list` require the target's current text or name as a second argument.
+It is compared case-insensitively after trimming, and a mismatch is refused with
+no request sent and the actual name in the error. An identifier alone, which is
+easy to mix up, cannot delete anything. A live test confirmed that a delete with
+the wrong text was refused and both items remained.
+
+**Built-in lists are never deleted.** The shopping and to-do lists carry a
+`systemId` (`-10`, `-11`); `delete_list` refuses any list with a `systemId`
+before sending anything. The web app shows a dedicated warning for this case and
+offers `taskrestoresystemlist`, which this client does not use.
+
+**Session-scoped staleness after deletes.** A session that has already read a
+list keeps returning an item deleted by another session, for at least 15 s in
+testing, while the deleting session and any freshly logged-in session no longer
+show it (and `taskget` on the deleted item is rejected). Edits were visible
+across sessions at once. Readbacks therefore run in the session that made the
+change, and live verification of a delete must use a fresh login. The same
+mechanism plausibly means a long-lived server session can keep showing items
+deleted from another device; that has not been tested with a second device.
+
 ## Mutation acknowledgement
 
 Both writes (`taskcreate`, `taskmark`) may return only an ID, or nothing

@@ -572,3 +572,44 @@ def build_mark_item_fields(item_id: str, completed: bool) -> dict[str, str]:
         "a00taskId": item_id,
         "a00complete": "true" if completed else "false",
     }
+
+
+def build_update_item_fields(item_id: str, text: str) -> dict[str, str]:
+    """Build taskupdate2 fields that change only an item's text.
+
+    taskupdate2 is partial: live evidence (2026-09-29) showed a text-only update
+    leaving the item's completion, description, due date and list untouched.
+
+    Raises:
+        ValueError: If the id is not an item identifier.
+    """
+    _require_prefix(item_id, "task/")
+    return {"partnerScope": "Family", "taskId": item_id, "text": text}
+
+
+def build_delete_item_fields(item_id: str) -> dict[str, str]:
+    """Build taskdelete fields.
+
+    taskdelete removes list items only, unlike the web app's generic metadelete,
+    which deletes any object by id.
+
+    Raises:
+        ValueError: If the id is not an item identifier.
+    """
+    _require_prefix(item_id, "task/")
+    return {"partnerScope": "Family", "a00taskId": item_id}
+
+
+def build_delete_list_fields(list_id: str) -> dict[str, str]:
+    """Build taskdeletelist fields, which delete a list together with its items.
+
+    Raises:
+        ValueError: If the id is not a list identifier.
+    """
+    _require_prefix(list_id, "taskList/")
+    return {"partnerScope": "Family", "a00id": list_id}
+
+
+def _require_prefix(id_str: str, prefix: str) -> None:
+    if not id_str.startswith(prefix):
+        raise ValueError(f"expected an identifier starting with {prefix!r}")

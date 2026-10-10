@@ -49,7 +49,7 @@ a migrated database.
 
 ## What it does
 
-Ten MCP tools are exposed today:
+Thirteen MCP tools are exposed today:
 
 | Tool | Type | Description |
 | --- | --- | --- |
@@ -61,6 +61,9 @@ Ten MCP tools are exposed today:
 | `add_list_item` | write | Add an item to a list, assigned to everyone or to named members in the same call, with an idempotency key so retries don't create duplicates |
 | `set_list_item_checked` | write | Mark a list item checked or unchecked (explicit target state, not a toggle) |
 | `set_list_item_assignees` | write | Change only who an existing list item is assigned to; nothing else about the item changes |
+| `update_list_item` | write | Change a list item's text; its checked state, list, category and due date are kept |
+| `delete_list_item` | write | Delete one list item; requires its current text as confirmation, because there is no undo |
+| `delete_list` | write | Delete a whole list and its items; requires its current name as confirmation; built-in lists are refused |
 | `create_calendar_event` | write | Add a timed, one-off event to the family calendar, assigned to everyone or to named members, and confirm it by reading it back |
 | `set_calendar_event_attendees` | write | Change only who an existing, ordinary, one-off, timed family-calendar event is assigned to, and confirm nothing else about it changed |
 
@@ -114,7 +117,11 @@ A few things worth knowing about how these behave:
   and is `confirmed` only when a readback shows the new attendees and every
   other field (title, time, zone, location, description, recurrence, calendar,
   reminder) unchanged; `mismatched` means something else also changed.
-- There is no delete or move tool yet, and item `quantity` cannot be read back
+- **List deletes need confirmation.** `delete_list_item` and `delete_list`
+  require the item's current text or the list's current name; a mismatch
+  deletes nothing. FamilyWall has no undo, and the built-in shopping and to-do
+  lists are never deleted.
+- There is no move tool yet, and item `quantity` cannot be read back
   (FamilyWall's API doesn't return it).
 - **Assignment is shown by name, never by account ID.** `get_week_overview` and
   `get_list_items` report `assigned_to` (names), `assigned_to_everyone`, and an

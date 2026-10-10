@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import date
 from typing import Literal
 
@@ -19,6 +20,7 @@ from familywall_mcp.familywall.lists import ListItem
 from familywall_mcp.interfaces import ReceiptRepository
 from familywall_mcp.models import DomainModel, Principal
 from familywall_mcp.services.calendar import CalendarService, NewTimedEvent
+from familywall_mcp.services.list_edits import ListEditService, ListWriteResult
 from familywall_mcp.services.lists import ListService
 from familywall_mcp.services.members import (
     MemberSelectionError,
@@ -141,6 +143,13 @@ class SetListItemAssigneesResponse(DomainModel):
     assigned_to_everyone: bool
     # Populated if and only if outcome is mismatched:
     mismatched_fields: tuple[str, ...] = ()
+
+
+class ListWriteResponse(DomainModel):
+    """Response from update_list_item, delete_list_item and delete_list."""
+
+    family_name: str
+    outcome: str
 
 
 class CreateCalendarEventResponse(DomainModel):
@@ -287,6 +296,35 @@ class ToolRegistry:
             ),
             annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
         )(self._set_list_item_assignees)
+
+        server.tool(
+            name="update_list_item",
+            description=(
+                "Change the text of a list item by its item_id. Its checked state, "
+                "list, category, due date and everything else stay as they are."
+            ),
+            annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
+        )(self._update_list_item)
+
+        server.tool(
+            name="delete_list_item",
+            description=(
+                "Delete one list item by its item_id. There is no undo, so expected_text "
+                "must repeat the item's current text; a mismatch deletes nothing."
+            ),
+            annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True),
+        )(self._delete_list_item)
+
+        server.tool(
+            name="delete_list",
+            description=(
+                "Delete a whole list, including all its items, by its list_id. There "
+                "is no undo, so expected_name must repeat the list's current name; a "
+                "mismatch deletes nothing. FamilyWall's built-in shopping and to-do "
+                "lists are refused."
+            ),
+            annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True),
+        )(self._delete_list)
 
         server.tool(
             name="create_calendar_event",
@@ -670,6 +708,90 @@ class ToolRegistry:
                 assigned_to=assignment.display_names,
                 assigned_to_everyone=assignment.to_all,
                 mismatched_fields=result.mismatched_fields,
+            )
+        except FamilyWallError as exc:
+            return ErrorResponse(
+                error_code=exc.info.code,
+                error_message=exc.info.message,
+                error_recovery=exc.info.recovery,
+            )
+
+    async def _update_list_item(
+        self,
+        item_id: str,
+        text: str,
+        idempotency_key: str | None = None,
+    ) -> ListWriteResponse | ErrorResponse:
+        """Change a list item's text. Zero upstream calls when writes are disabled."""
+        if not self._config.enable_writes:
+            return ErrorResponse(
+                error_code="writes_disabled",
+                error_message="Write operations are disabled.",
+                error_recovery="Set FAMILYWALL_ENABLE_WRITES=true to enable writes.",
+            )
+        return await self._list_edit(
+            lambda service, principal, op_id, family_id: service.update_item_text(
+                principal, item_id, text, op_id, self._receipt_repository, family_id
+            ),
+            idempotency_key,
+        )
+
+    async def _delete_list_item(
+        self,
+        item_id: str,
+        expected_text: str,
+        idempotency_key: str | None = None,
+    ) -> ListWriteResponse | ErrorResponse:
+        """Delete one list item. Zero upstream calls when writes are disabled."""
+        if not self._config.enable_writes:
+            return ErrorResponse(
+                error_code="writes_disabled",
+                error_message="Write operations are disabled.",
+                error_recovery="Set FAMILYWALL_ENABLE_WRITES=true to enable writes.",
+            )
+        return await self._list_edit(
+            lambda service, principal, op_id, family_id: service.delete_item(
+                principal, item_id, expected_text, op_id, self._receipt_repository, family_id
+            ),
+            idempotency_key,
+        )
+
+    async def _delete_list(
+        self,
+        list_id: str,
+        expected_name: str,
+        idempotency_key: str | None = None,
+    ) -> ListWriteResponse | ErrorResponse:
+        """Delete a whole list. Zero upstream calls when writes are disabled."""
+        if not self._config.enable_writes:
+            return ErrorResponse(
+                error_code="writes_disabled",
+                error_message="Write operations are disabled.",
+                error_recovery="Set FAMILYWALL_ENABLE_WRITES=true to enable writes.",
+            )
+        return await self._list_edit(
+            lambda service, principal, op_id, family_id: service.delete_list(
+                principal, list_id, expected_name, op_id, self._receipt_repository, family_id
+            ),
+            idempotency_key,
+        )
+
+    async def _list_edit(
+        self,
+        operation: Callable[[ListEditService, Principal, str, str], Awaitable[ListWriteResult]],
+        idempotency_key: str | None,
+    ) -> ListWriteResponse | ErrorResponse:
+        try:
+            principal, ctx = await self._context_resolver.resolve()
+            service = ListEditService(write_transport(self._session_pool, principal))
+            result = await operation(
+                service,
+                principal,
+                idempotency_key or str(uuid.uuid4()),
+                ctx.family_context.family_id,
+            )
+            return ListWriteResponse(
+                family_name=ctx.discovered_family.name, outcome=result.outcome.value
             )
         except FamilyWallError as exc:
             return ErrorResponse(
