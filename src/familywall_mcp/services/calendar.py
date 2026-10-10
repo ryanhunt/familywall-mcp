@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Literal, Protocol
 from zoneinfo import ZoneInfo, available_timezones
@@ -131,7 +131,7 @@ class WeekOverview(DomainModel):
     """IANA timezone name."""
 
     days: tuple[DayAgenda, ...]
-    """Always exactly 7 entries for a week, one per day."""
+    """One entry per day of the range: exactly 7 for a week."""
 
     total_events: int
     """Count of unique events returned (de-duplicated by occurrence_id)."""
@@ -200,6 +200,7 @@ class CalendarService:
 
     DEFAULT_MAX_EVENTS = 500
     MAX_DAYS_PER_REQUEST = 31
+    MAX_RANGE_DAYS = 62
 
     def __init__(
         self,
@@ -238,18 +239,63 @@ class CalendarService:
         """
         # Resolve the local week boundaries
         week_range = resolve_week(reference_date, timezone, week_starts_on)
+        return await self._overview(week_range.start, week_range.end, 7, timezone, calendar_id)
 
-        # Fetch all events within the week, splitting into 31-day chunks if needed
+    async def get_range_overview(
+        self,
+        start_date: date,
+        end_date: date,
+        timezone: str,
+        calendar_id: str,
+    ) -> WeekOverview:
+        """Fetch calendar events for an inclusive range of local days.
+
+        Args:
+            start_date: First day of the range.
+            end_date: Last day of the range (inclusive).
+            timezone: IANA timezone name for local interpretation.
+            calendar_id: Calendar ID to fetch.
+
+        Returns:
+            A WeekOverview with one DayAgenda per day of the range.
+
+        Raises:
+            ValueError: If the range is inverted, longer than MAX_RANGE_DAYS, or
+                the timezone is unknown. No request is sent in that case.
+        """
+        if end_date < start_date:
+            raise ValueError("The range ends before it starts.")
+        day_count = (end_date - start_date).days + 1
+        if day_count > self.MAX_RANGE_DAYS:
+            raise ValueError(f"The range is longer than {self.MAX_RANGE_DAYS} days.")
+        if timezone not in available_timezones():
+            raise ValueError(f"unknown timezone: {timezone}")
+        zone = ZoneInfo(timezone)
+        range_start = datetime.combine(start_date, time(0), tzinfo=zone)
+        range_end = datetime.combine(end_date + timedelta(days=1), time(0), tzinfo=zone)
+        return await self._overview(range_start, range_end, day_count, timezone, calendar_id)
+
+    async def _overview(
+        self,
+        range_start: datetime,
+        range_end: datetime,
+        day_count: int,
+        timezone: str,
+        calendar_id: str,
+    ) -> WeekOverview:
+        """Fetch, de-duplicate and assign events over `day_count` local days."""
+
+        # Fetch all events within the range, splitting into 31-day chunks if needed
         all_events: dict[str, CalendarEvent] = {}  # Keyed by occurrence_id
         total_skipped = 0
         complete = True
         notes: list[str] = []
 
-        # Break the week into 31-day chunks and fetch each
-        current = week_range.start
-        while current < week_range.end:
+        # Break the range into 31-day chunks and fetch each
+        current = range_start
+        while current < range_end:
             # Calculate the chunk end (31 days or week end, whichever is sooner)
-            days_remaining = (week_range.end - current).days
+            days_remaining = (range_end - current).days
             chunk_days = min(days_remaining, self.MAX_DAYS_PER_REQUEST)
             chunk_range = resolve_days(current.date(), chunk_days, timezone)
 
@@ -289,9 +335,9 @@ class CalendarService:
         # Assign events to days
         days_dict: dict[date, list[CalendarEvent]] = {}
 
-        # Initialize all 7 days of the week
-        for day_offset in range(7):
-            day_date = week_range.start.date() + timedelta(days=day_offset)
+        # Initialize every day of the range
+        for day_offset in range(day_count):
+            day_date = range_start.date() + timedelta(days=day_offset)
             days_dict[day_date] = []
 
         # Assign each event to the days it covers
@@ -305,15 +351,15 @@ class CalendarService:
 
         # Build DayAgenda entries with ordered events
         day_agendas: list[DayAgenda] = []
-        for day_offset in range(7):
-            day_date = week_range.start.date() + timedelta(days=day_offset)
+        for day_offset in range(day_count):
+            day_date = range_start.date() + timedelta(days=day_offset)
             events = days_dict[day_date]
             ordered = _order_events_in_day(events)
             day_agendas.append(DayAgenda(day=day_date, events=tuple(ordered)))
 
         return WeekOverview(
-            range_start=week_range.start,
-            range_end=week_range.end,
+            range_start=range_start,
+            range_end=range_end,
             timezone=timezone,
             days=tuple(day_agendas),
             total_events=len(all_events),

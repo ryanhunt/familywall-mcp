@@ -408,25 +408,6 @@ class TestEventCapAndPartialResults:
 class TestMultipleRequests:
     """Tests for splitting long ranges into multiple requests."""
 
-    async def test_60_day_range_issues_multiple_requests(
-        self, service: CalendarService, fake_transport: FakeCalendarTransport
-    ) -> None:
-        """A 60-day range issues more than one request, each within the 31-day bound."""
-        # This test would require a longer date range than a week
-        # For now, just verify the single week doesn't exceed max days per request
-        fake_transport.set_response_sequence([[]])
-
-        await service.get_week_overview(
-            date(2026, 9, 14), "Australia/Sydney", "calendar/family-123"
-        )
-
-        # A week is 7 days, so it should be one request
-        assert len(fake_transport.calls) == 1
-
-        # Verify the request spans at most 31 days
-        endpoint, fields = fake_transport.calls[0]
-        # The service should not split a week into multiple requests
-
 
 class TestDSTTransitions:
     """Tests for daylight saving time transitions."""
@@ -589,3 +570,81 @@ class TestEventOrdering:
 
         if isinstance(timed_event_1.span, TimedSpan) and isinstance(timed_event_2.span, TimedSpan):
             assert timed_event_1.span.start <= timed_event_2.span.start
+
+
+class TestRangeOverview:
+    """An arbitrary inclusive date range, one agenda per day."""
+
+    async def test_returns_one_agenda_per_day(
+        self, service: CalendarService, fake_transport: FakeCalendarTransport
+    ) -> None:
+        fake_transport.set_response_sequence([[timed_event()]])
+
+        overview = await service.get_range_overview(
+            date(2026, 9, 10), date(2026, 9, 19), "Australia/Sydney", "calendar/family-123"
+        )
+
+        assert [d.day for d in overview.days] == [
+            date(2026, 9, 10) + timedelta(days=i) for i in range(10)
+        ]
+        assert len(fake_transport.calls) == 1
+        assert overview.total_events == 1
+
+    async def test_single_day_range(
+        self, service: CalendarService, fake_transport: FakeCalendarTransport
+    ) -> None:
+        fake_transport.set_response_sequence([[]])
+
+        overview = await service.get_range_overview(
+            date(2026, 9, 14), date(2026, 9, 14), "Australia/Sydney", "calendar/family-123"
+        )
+
+        assert [d.day for d in overview.days] == [date(2026, 9, 14)]
+        _, fields = fake_transport.calls[0]
+        assert fields["a00from"] == "2026-09-14T00:00:00+10:00"
+        assert fields["a00to"] == "2026-09-15T00:00:00+10:00"
+
+    async def test_60_day_range_is_fetched_in_contiguous_bounded_chunks(
+        self, service: CalendarService, fake_transport: FakeCalendarTransport
+    ) -> None:
+        fake_transport.set_response_sequence([[], []])
+
+        overview = await service.get_range_overview(
+            date(2026, 1, 1), date(2026, 3, 1), "Europe/Berlin", "calendar/family-123"
+        )
+
+        assert len(overview.days) == 60
+        assert len(fake_transport.calls) == 2
+        first, second = (fields for _, fields in fake_transport.calls)
+        assert first["a00from"] == "2026-01-01T00:00:00+01:00"
+        assert first["a00to"] == second["a00from"]
+        assert second["a00to"] == "2026-03-02T00:00:00+01:00"
+
+    async def test_event_in_two_chunks_is_counted_once(
+        self, service: CalendarService, fake_transport: FakeCalendarTransport
+    ) -> None:
+        fake_transport.set_response_sequence([[timed_event()], [timed_event()]])
+
+        overview = await service.get_range_overview(
+            date(2026, 9, 1), date(2026, 10, 20), "Australia/Sydney", "calendar/family-123"
+        )
+
+        assert overview.total_events == 1
+
+    async def test_end_before_start_is_refused_with_zero_calls(
+        self, service: CalendarService, fake_transport: FakeCalendarTransport
+    ) -> None:
+        with pytest.raises(ValueError):
+            await service.get_range_overview(
+                date(2026, 9, 14), date(2026, 9, 13), "Europe/Berlin", "calendar/family-123"
+            )
+        assert fake_transport.calls == []
+
+    async def test_overlong_range_is_refused_with_zero_calls(
+        self, service: CalendarService, fake_transport: FakeCalendarTransport
+    ) -> None:
+        with pytest.raises(ValueError):
+            await service.get_range_overview(
+                date(2026, 1, 1), date(2026, 3, 5), "Europe/Berlin", "calendar/family-123"
+            )
+        assert fake_transport.calls == []

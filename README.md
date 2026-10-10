@@ -49,14 +49,15 @@ a migrated database.
 
 ## What it does
 
-Ten MCP tools are exposed today:
+Eleven MCP tools are exposed today:
 
 | Tool | Type | Description |
 | --- | --- | --- |
 | `get_connection_status` | read | Connection state, family name, member count, resolved timezone, whether writes are enabled |
 | `list_shopping_lists` | read | Every shopping/todo list accessible to the authenticated member |
 | `get_list_items` | read | Items in a specific list, with checked state and who it's assigned to |
-| `get_week_overview` | read | A timezone-aware week of calendar events (Monday- or Sunday-start), with recurrence already expanded, and who each event is assigned to |
+| `get_week_overview` | read | A timezone-aware week of calendar events (Monday- or Sunday-start), with recurrence already expanded: local start and end, location, description, whether it recurs, and who each event is assigned to |
+| `get_calendar_events` | read | Events for one day or an inclusive range of up to 62 days, grouped by local day, with the same details |
 | `list_family_members` | read | The family's members by display name and first name, and which one is you (never account IDs) |
 | `add_list_item` | write | Add an item to a list, assigned to everyone or to named members in the same call, with an idempotency key so retries don't create duplicates |
 | `set_list_item_checked` | write | Mark a list item checked or unchecked (explicit target state, not a toggle) |

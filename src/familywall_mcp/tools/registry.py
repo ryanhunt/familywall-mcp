@@ -6,6 +6,7 @@ import datetime
 import uuid
 from datetime import date
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
@@ -13,12 +14,12 @@ from pydantic import ValidationError
 
 from familywall_mcp.config import AppConfig
 from familywall_mcp.errors import FamilyWallError
-from familywall_mcp.familywall.calendar import CalendarEvent
+from familywall_mcp.familywall.calendar import CalendarEvent, TimedSpan
 from familywall_mcp.familywall.discovery import DiscoveredFamily
 from familywall_mcp.familywall.lists import ListItem
 from familywall_mcp.interfaces import ReceiptRepository
 from familywall_mcp.models import DomainModel, Principal
-from familywall_mcp.services.calendar import CalendarService, NewTimedEvent
+from familywall_mcp.services.calendar import CalendarService, NewTimedEvent, WeekOverview
 from familywall_mcp.services.lists import ListService
 from familywall_mcp.services.members import (
     MemberSelectionError,
@@ -104,6 +105,19 @@ class GetWeekOverviewResponse(DomainModel):
     complete: bool
     notes: tuple[str, ...]
     days: tuple[object, ...]  # Contains DayAgenda objects
+
+
+class GetCalendarEventsResponse(DomainModel):
+    """Response from get_calendar_events."""
+
+    family_name: str
+    resolved_timezone: str
+    range_start: str
+    range_end: str
+    total_events: int
+    complete: bool
+    notes: tuple[str, ...]
+    days: tuple[object, ...]
 
 
 class AddListItemResponse(DomainModel):
@@ -243,9 +257,24 @@ class ToolRegistry:
 
         server.tool(
             name="get_week_overview",
-            description="Get a weekly calendar overview.",
+            description=(
+                "Get a weekly calendar overview. Each event has its local start and "
+                "end (dates for all-day events), location, description, whether it "
+                "belongs to a recurring series, and who it is assigned to."
+            ),
             annotations=ToolAnnotations(read_only_hint=True),
         )(self._get_week_overview)
+
+        server.tool(
+            name="get_calendar_events",
+            description=(
+                "Get calendar events for one day or an inclusive range of days "
+                "('YYYY-MM-DD'; end_date defaults to start_date, at most 62 days), "
+                "grouped by local day, with the same event details as "
+                "get_week_overview."
+            ),
+            annotations=ToolAnnotations(read_only_hint=True),
+        )(self._get_calendar_events)
 
         server.tool(
             name="list_family_members",
@@ -425,15 +454,49 @@ class ToolRegistry:
                 total_events=overview.total_events,
                 complete=overview.complete,
                 notes=overview.notes,
-                days=tuple(
-                    {
-                        "day": str(day_agenda.day),
-                        "events": [
-                            _event_view(evt, ctx.discovered_family) for evt in day_agenda.events
-                        ],
-                    }
-                    for day_agenda in overview.days
-                ),
+                days=_day_views(overview, ctx.discovered_family),
+            )
+        except FamilyWallError as exc:
+            return ErrorResponse(
+                error_code=exc.info.code,
+                error_message=exc.info.message,
+                error_recovery=exc.info.recovery,
+            )
+
+    async def _get_calendar_events(
+        self,
+        start_date: str,
+        end_date: str | None = None,
+    ) -> GetCalendarEventsResponse | ErrorResponse:
+        """Get calendar events for an inclusive range of local days."""
+        try:
+            first = _parse_date(start_date)
+            last = _parse_date(end_date) if end_date else first
+        except ValueError as exc:
+            return _invalid_range(str(exc))
+        if last < first:
+            return _invalid_range("The range ends before it starts.")
+
+        try:
+            _principal, ctx = await self._context_resolver.resolve()
+            try:
+                overview = await ctx.calendar_service.get_range_overview(
+                    first,
+                    last,
+                    ctx.authenticated_member_timezone,
+                    ctx.family_context.calendar_id,
+                )
+            except ValueError as exc:
+                return _invalid_range(str(exc))
+            return GetCalendarEventsResponse(
+                family_name=ctx.discovered_family.name,
+                resolved_timezone=overview.timezone,
+                range_start=overview.range_start.isoformat(),
+                range_end=overview.range_end.isoformat(),
+                total_events=overview.total_events,
+                complete=overview.complete,
+                notes=overview.notes,
+                days=_day_views(overview, ctx.discovered_family),
             )
         except FamilyWallError as exc:
             return ErrorResponse(
@@ -905,16 +968,59 @@ def _invalid_event(detail: str) -> ErrorResponse:
     )
 
 
-def _event_view(event: CalendarEvent, family: DiscoveredFamily) -> dict[str, object]:
-    """Build one get_week_overview event entry, with assignment shown as names only."""
+def _parse_date(value: str) -> date:
+    """Parse a bare 'YYYY-MM-DD' date."""
+    if "T" in value:
+        raise ValueError(f"Expected a date without a time, got {value!r}.")
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"Expected a 'YYYY-MM-DD' date, got {value!r}.") from exc
+
+
+def _invalid_range(message: str) -> ErrorResponse:
+    return ErrorResponse(
+        error_code="invalid_argument",
+        error_message=message,
+        error_recovery="Give dates as 'YYYY-MM-DD', at most 62 days apart.",
+    )
+
+
+def _event_view(event: CalendarEvent, timezone: str, family: DiscoveredFamily) -> dict[str, object]:
+    """Render one event in the overview's local time, with assignment as names only."""
+    if isinstance(event.span, TimedSpan):
+        zone = ZoneInfo(timezone)
+        start = event.span.start.astimezone(zone).isoformat()
+        end = event.span.end.astimezone(zone).isoformat()
+        all_day = False
+    else:
+        start = event.span.start_date.isoformat()
+        end = event.span.end_date.isoformat()
+        all_day = True
     assignment = describe_assignment(event.attendee_ids, event.to_all, family)
     return {
         "occurrence_id": event.occurrence_id,
         "title": event.title,
+        "all_day": all_day,
+        "start": start,
+        "end": end,
+        "location": event.location or None,
+        "description": event.description or None,
+        "recurring": event.is_recurring or event.is_series_exception,
         "assigned_to": list(assignment.names),
         "assigned_to_everyone": assignment.everyone,
         "unresolved_members": assignment.unresolved,
     }
+
+
+def _day_views(overview: WeekOverview, family: DiscoveredFamily) -> tuple[object, ...]:
+    return tuple(
+        {
+            "day": str(day_agenda.day),
+            "events": [_event_view(evt, overview.timezone, family) for evt in day_agenda.events],
+        }
+        for day_agenda in overview.days
+    )
 
 
 def _list_item_view(item: ListItem, family: DiscoveredFamily) -> ListItemResponse:

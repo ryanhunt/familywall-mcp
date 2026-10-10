@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -240,6 +240,31 @@ class FakeCalendarService:
             range_end=datetime.now(tz=UTC),
             timezone=timezone,
             days=tuple(DayAgenda(day=today, events=()) for _ in range(7)),
+            total_events=0,
+            complete=True,
+            notes=(),
+        )
+
+    async def get_range_overview(
+        self,
+        start_date: date,
+        end_date: date,
+        timezone: str,
+        calendar_id: str,
+    ) -> object:
+        """Return a fake range overview with one empty agenda per day."""
+        from familywall_mcp.services.calendar import DayAgenda, WeekOverview
+
+        if end_date < start_date:
+            raise ValueError("end before start")
+        days = (end_date - start_date).days + 1
+        return WeekOverview(
+            range_start=datetime.now(tz=UTC),
+            range_end=datetime.now(tz=UTC),
+            timezone=timezone,
+            days=tuple(
+                DayAgenda(day=start_date + timedelta(days=i), events=()) for i in range(days)
+            ),
             total_events=0,
             complete=True,
             notes=(),
@@ -1475,3 +1500,114 @@ async def test_t18_get_list_items_maps_assignment_to_names_and_counts_unresolved
     serialised = result.model_dump_json()
     assert "acct/1" not in serialised
     assert "acct/unknown" not in serialised
+
+
+def _parsed(raw: dict) -> object:
+    from familywall_mcp.familywall.calendar import parse_events
+
+    return parse_events([raw]).events[0]
+
+
+def test_event_view_timed_event_in_local_time() -> None:
+    from tests.support.calendar_fixtures import timed_event
+
+    from familywall_mcp.tools.registry import _event_view
+
+    view = _event_view(_parsed(timed_event()), "Europe/Berlin", create_discovered_family())
+
+    assert view == {
+        "occurrence_id": "evt-timed-001",
+        "title": "Team standup",
+        "all_day": False,
+        "start": "2026-09-14T11:30:00+02:00",
+        "end": "2026-09-14T12:00:00+02:00",
+        "location": None,
+        "description": None,
+        "recurring": False,
+        "assigned_to": [],
+        "assigned_to_everyone": None,
+        "unresolved_members": 0,
+    }
+
+
+def test_event_view_all_day_event_uses_dates() -> None:
+    from tests.support.calendar_fixtures import multiday_all_day_event
+
+    from familywall_mcp.tools.registry import _event_view
+
+    view = _event_view(
+        _parsed(multiday_all_day_event()), "Europe/Berlin", create_discovered_family()
+    )
+
+    assert view["all_day"] is True
+    assert view["start"] == "2026-09-20"
+    assert view["end"] == "2026-09-23"
+
+
+def test_event_view_carries_location_description_and_recurrence() -> None:
+    from tests.support.calendar_fixtures import timed_event
+
+    from familywall_mcp.tools.registry import _event_view
+
+    raw = {
+        **timed_event(),
+        "where": "Praxis",
+        "description": "Kontrolle",
+        "recurrency": "WEEKLY",
+        "rrule": "FREQ=WEEKLY",
+    }
+    view = _event_view(_parsed(raw), "Europe/Berlin", create_discovered_family())
+
+    assert view["location"] == "Praxis"
+    assert view["description"] == "Kontrolle"
+    assert view["recurring"] is True
+
+
+def test_event_view_blank_location_is_none() -> None:
+    from tests.support.calendar_fixtures import timed_event
+
+    from familywall_mcp.tools.registry import _event_view
+
+    view = _event_view(
+        _parsed({**timed_event(), "where": "", "description": ""}),
+        "UTC",
+        create_discovered_family(),
+    )
+
+    assert view["location"] is None
+    assert view["description"] is None
+
+
+async def test_get_calendar_events_single_day_default() -> None:
+    registry, _ = create_registry(_writes_config(False), create_discovered_family())
+
+    result = await registry._get_calendar_events("2026-09-28")
+
+    assert not isinstance(result, ErrorResponse)
+    assert [d["day"] for d in result.days] == ["2026-09-28"]
+    assert result.resolved_timezone == "Australia/Sydney"
+
+
+async def test_get_calendar_events_range() -> None:
+    registry, _ = create_registry(_writes_config(False), create_discovered_family())
+
+    result = await registry._get_calendar_events("2026-10-01", "2026-10-03")
+
+    assert not isinstance(result, ErrorResponse)
+    assert [d["day"] for d in result.days] == ["2026-10-01", "2026-10-02", "2026-10-03"]
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [("01.10.2026", None), ("2026-10-01T10:00", None), ("2026-10-03", "2026-10-01")],
+)
+async def test_get_calendar_events_rejects_bad_input_with_zero_calls(
+    start: str, end: str | None
+) -> None:
+    registry, pool = create_registry(_writes_config(False), create_discovered_family())
+
+    result = await registry._get_calendar_events(start, end)
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error_code == "invalid_argument"
+    assert pool.calls == []
