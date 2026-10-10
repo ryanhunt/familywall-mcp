@@ -22,6 +22,18 @@ class ListType(StrEnum):
     OTHER = "OTHER"
 
 
+# FamilyWall's two built-in lists carry an untranslated localization key as their
+# `name` ("SYS-CAT-SHOPPINGLIST", "SYS-CAT-TODOS"); the web and mobile clients
+# resolve it against the app's locale before display. Nothing in the payload
+# carries the resolved string or the locale, so map the keys to plain English
+# names (an assistant can render them in the user's language). Keys absent from
+# this map pass through unchanged.
+SYSTEM_LIST_DISPLAY_NAMES = {
+    "SYS-CAT-SHOPPINGLIST": "Shopping",
+    "SYS-CAT-TODOS": "To-do",
+}
+
+
 class ShoppingList(DomainModel):
     """A shopping list summary from the wire protocol."""
 
@@ -230,6 +242,8 @@ def parse_list_summaries(payload: object) -> tuple[ShoppingList, ...]:
             raise MalformedPayloadError()
 
         _validate_prefix(meta_id, "taskList/")
+
+        name = SYSTEM_LIST_DISPLAY_NAMES.get(name, name)
 
         # Type handling: preserve raw, compute known
         type_raw = item.get("taskListType", "")

@@ -819,3 +819,59 @@ class TestDueDateAndReminderFields:
         assert result.skipped == 0
         assert len(result.items) == 1
         assert result.items[0].reminder is None
+
+
+class TestSystemListDisplayNames:
+    """Tests for display names of FamilyWall's built-in lists."""
+
+    def test_system_shopping_list_gets_display_name(self) -> None:
+        """The default shopping list's untranslated key becomes a plain English name."""
+        payload = [
+            {
+                "metaId": "taskList/1000001_2000036",
+                "name": "SYS-CAT-SHOPPINGLIST",
+                "taskListType": "SHOPPING_LIST",
+                "systemId": "-10",
+            }
+        ]
+        lists = parse_list_summaries(payload)
+        assert lists[0].name == "Shopping"
+        assert lists[0].list_id == "taskList/1000001_2000036"
+        assert lists[0].system_id == "-10"
+
+    def test_system_todo_list_gets_display_name(self) -> None:
+        """The default to-do list's untranslated key becomes a plain English name."""
+        payload = [
+            {
+                "metaId": "taskList/1000001_2000037",
+                "name": "SYS-CAT-TODOS",
+                "taskListType": "TODOS",
+                "systemId": "-11",
+            }
+        ]
+        lists = parse_list_summaries(payload)
+        assert lists[0].name == "To-do"
+
+    def test_user_named_list_is_untouched(self) -> None:
+        """A list the family named itself keeps its own name."""
+        payload = [
+            {
+                "metaId": "taskList/1",
+                "name": "Holiday packing",
+                "taskListType": "TODOS",
+            }
+        ]
+        lists = parse_list_summaries(payload)
+        assert lists[0].name == "Holiday packing"
+
+    def test_unknown_system_key_is_left_as_is(self) -> None:
+        """An unmapped SYS-CAT key passes through rather than being blanked."""
+        payload = [
+            {
+                "metaId": "taskList/2",
+                "name": "SYS-CAT-SOMETHING-NEW",
+                "taskListType": "OTHER",
+            }
+        ]
+        lists = parse_list_summaries(payload)
+        assert lists[0].name == "SYS-CAT-SOMETHING-NEW"
