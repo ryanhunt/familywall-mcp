@@ -56,6 +56,14 @@ class ListItem(DomainModel):
     reminder: tuple[str, str, str] | None = None
     """The verbatim (reminderType, reminderUnit, reminderValue) strings; None when
     absent or malformed."""
+    last_action: str | None = None
+    """The verbatim ``lastAction`` (e.g. ``CREATED``, ``UPDATED``); None when absent."""
+    last_action_at: datetime | None = None
+    """When ``lastAction`` happened (from ``lastActionDate``); None when absent or malformed."""
+    last_action_author_id: str | None = None
+    """Account ID that performed ``lastAction`` (from ``lastActionAuthor``); None when absent."""
+    modified_at: datetime | None = None
+    """When the item was last modified (from ``modifDate``); None when absent or malformed."""
 
 
 class ParsedItems(NamedTuple):
@@ -337,6 +345,14 @@ def parse_list_items(payload: object) -> ParsedItems:
             # Dates
             created_at = _parse_iso8601_utc(entry.get("creationDate"))
             completed_at = _parse_iso8601_utc(entry.get("completedDate"))
+            last_action_at = _parse_iso8601_utc(entry.get("lastActionDate"))
+            modified_at = _parse_iso8601_utc(entry.get("modifDate"))
+            last_action = entry.get("lastAction")
+            if not isinstance(last_action, str) or not last_action:
+                last_action = None
+            last_action_author_id = entry.get("lastActionAuthor")
+            if not isinstance(last_action_author_id, str) or not last_action_author_id:
+                last_action_author_id = None
 
             # Assignment fields (optional; a malformed value skips the item,
             # via the same MalformedPayloadError skip-and-count path).
@@ -370,6 +386,10 @@ def parse_list_items(payload: object) -> ParsedItems:
                     to_all=to_all,
                     due_date=due_date,
                     reminder=reminder,
+                    last_action=last_action,
+                    last_action_at=last_action_at,
+                    last_action_author_id=last_action_author_id,
+                    modified_at=modified_at,
                 )
             )
         except MalformedPayloadError:

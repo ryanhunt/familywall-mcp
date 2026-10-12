@@ -1475,3 +1475,45 @@ async def test_t18_get_list_items_maps_assignment_to_names_and_counts_unresolved
     serialised = result.model_dump_json()
     assert "acct/1" not in serialised
     assert "acct/unknown" not in serialised
+
+
+class FakeSessionPoolWithLastAction(FakeSessionPool):
+    """Session pool whose single list item carries last-action metadata."""
+
+    async def call(
+        self, principal: Principal, endpoint: str, fields: dict[str, str], read_write: str
+    ) -> object:
+        if endpoint == "tasklist":
+            return [
+                {
+                    "metaId": "task/601",
+                    "taskListId": fields.get("a00listId", "taskList/1"),
+                    "text": "Milk",
+                    "complete": "false",
+                    "lastAction": "UPDATED",
+                    "lastActionDate": "2026-10-12T03:25:37.000Z",
+                    "lastActionAuthor": "acct/1",
+                    "modifDate": "2026-10-12T03:25:37.286Z",
+                }
+            ]
+        return await super().call(principal, endpoint, fields, read_write)
+
+
+@pytest.mark.asyncio
+async def test_get_list_items_reports_last_action_by_name() -> None:
+    """get_list_items shows when and by whom an item last changed, as a name, never an ID."""
+    config = AppConfig.from_env(
+        {"FAMILYWALL_LOCAL_SUBJECT": "test-local-user", "FAMILYWALL_MODE": "stdio"}
+    )
+    registry, _pool = create_registry(config, create_discovered_family())
+    registry._session_pool = FakeSessionPoolWithLastAction()  # type: ignore[assignment]
+
+    result = await registry._get_list_items("taskList/1")
+
+    assert isinstance(result, GetListItemsResponse)
+    item = result.items[0]
+    assert item.last_action == "UPDATED"
+    assert item.last_action_at == "2026-10-12T03:25:37Z"
+    assert item.last_action_by == "Test Member"
+    assert item.modified_at == "2026-10-12T03:25:37Z"
+    assert "acct/1" not in result.model_dump_json()

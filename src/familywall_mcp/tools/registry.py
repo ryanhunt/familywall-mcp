@@ -68,6 +68,13 @@ class ListItemResponse(DomainModel):
     assigned_to: tuple[str, ...]
     assigned_to_everyone: bool | None
     unresolved_members: int
+    last_action: str | None = None
+    last_action_at: str | None = None
+    """UTC ISO-8601 instant of the last action; None when FamilyWall did not report it."""
+    last_action_by: str | None = None
+    """Display name of who performed the last action; None when absent or not a family member."""
+    modified_at: str | None = None
+    """UTC ISO-8601 instant of the last modification; None when not reported."""
 
 
 class GetListItemsResponse(DomainModel):
@@ -920,6 +927,11 @@ def _event_view(event: CalendarEvent, family: DiscoveredFamily) -> dict[str, obj
 def _list_item_view(item: ListItem, family: DiscoveredFamily) -> ListItemResponse:
     """Build one get_list_items response item, with assignment shown as names only."""
     assignment = describe_assignment(item.assignee_ids, item.to_all, family)
+    author_names = (
+        describe_assignment((item.last_action_author_id,), None, family).names
+        if item.last_action_author_id
+        else ()
+    )
     return ListItemResponse(
         item_id=item.item_id,
         text=item.text,
@@ -928,4 +940,15 @@ def _list_item_view(item: ListItem, family: DiscoveredFamily) -> ListItemRespons
         assigned_to=assignment.names,
         assigned_to_everyone=assignment.everyone,
         unresolved_members=assignment.unresolved,
+        last_action=item.last_action,
+        last_action_at=_iso_utc(item.last_action_at),
+        last_action_by=author_names[0] if author_names else None,
+        modified_at=_iso_utc(item.modified_at),
     )
+
+
+def _iso_utc(value: datetime.datetime | None) -> str | None:
+    """Format an aware datetime as a UTC ISO-8601 string with a Z suffix."""
+    if value is None:
+        return None
+    return value.astimezone(datetime.UTC).isoformat(timespec="seconds").replace("+00:00", "Z")

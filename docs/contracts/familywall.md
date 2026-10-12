@@ -173,6 +173,14 @@ items with keys:
   what lets the service verify membership before `taskmark`.**
 - `complete` is the string `"false"` / `"true"`.
 - `categories` are objects with `name` and a `system` string flag.
+- `lastAction` (`CREATED`, `UPDATED`), `lastActionDate`, `lastActionAuthor` (an
+  account ID) and `modifDate` are parsed onto `ListItem` and surfaced by
+  `get_list_items` as `last_action`, `last_action_at`, `last_action_by` (a
+  display name, never the ID) and `modified_at` (live-observed 2026-10-12).
+  Unchecking an item removes `completedDate` and records `lastAction=UPDATED`;
+  the previous completed state is not kept anywhere on the item.
+- The default shopping list's `systemId` reads back as `-10` (the to-do list's
+  as `-11`), not a `SYS-CAT-…` string (live-observed 2026-10-12).
 - **No quantity field was returned on any item.** Quantity remains a write-path
   parameter with no evidenced read-back, so a quantity a tool writes may not be
   observable. This must be stated as a limitation rather than assumed to work.

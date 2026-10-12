@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -324,6 +324,48 @@ class TestParseListItems:
         assert result.items[0].created_at.month == 9
         assert result.items[0].created_at.day == 13
         assert result.items[0].created_at.tzinfo == UTC
+
+    def test_last_action_fields_parse(self) -> None:
+        """lastAction, lastActionDate, lastActionAuthor and modifDate are read."""
+        payload = [
+            {
+                "metaId": "task/1",
+                "taskListId": "taskList/1",
+                "text": "Test",
+                "complete": "false",
+                "lastAction": "UPDATED",
+                "lastActionDate": "2026-10-12T03:25:37.000Z",
+                "lastActionAuthor": "acct/9",
+                "modifDate": "2026-10-12T03:25:37.286Z",
+            }
+        ]
+        item = parse_list_items(payload).items[0]
+        assert item.last_action == "UPDATED"
+        assert item.last_action_at == datetime(2026, 10, 12, 3, 25, 37, tzinfo=UTC)
+        assert item.last_action_author_id == "acct/9"
+        assert item.modified_at is not None
+        assert item.modified_at.tzinfo == UTC
+
+    def test_last_action_fields_absent_or_malformed_yield_none(self) -> None:
+        """Missing or malformed last-action fields yield None without skipping the item."""
+        payload = [
+            {
+                "metaId": "task/1",
+                "taskListId": "taskList/1",
+                "text": "Test",
+                "complete": "false",
+                "lastAction": 7,
+                "lastActionDate": "not-a-date",
+                "lastActionAuthor": "",
+            }
+        ]
+        result = parse_list_items(payload)
+        assert result.skipped == 0
+        item = result.items[0]
+        assert item.last_action is None
+        assert item.last_action_at is None
+        assert item.last_action_author_id is None
+        assert item.modified_at is None
 
     def test_item_with_wrong_metaId_prefix_skipped(self) -> None:
         """Item with metaId: 'taskList/1' (wrong prefix) is skipped."""
